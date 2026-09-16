@@ -2,7 +2,7 @@
 
 # LidKeep
 
-**Turn the display off without stopping the Mac.**
+**Turn the display off. Don't let the Mac sleep.**
 
 The screen goes pitch black; the machine keeps working. Remote desktop stays connected, downloads keep going, builds keep running. Press a hotkey (or run one command over SSH) and the picture comes straight back.
 
@@ -17,7 +17,7 @@ $ lidkeep off      # screen goes black, system keeps running
 $ lidkeep on       # display restored (also works over SSH)
 ```
 
-## The problem it solves
+## Sound familiar?
 
 macOS wires "display off" and "system asleep" together. You only want the screen off; the system puts the whole machine to sleep.
 
@@ -26,11 +26,13 @@ macOS wires "display off" and "system asleep" together. You only want the screen
 | You want the screen dark to save power, but you're not at the machine | The moment it sleeps, remote desktop connects to a black frame |
 | You close the lid and toss the Mac in a bag | The machine sleeps with it — downloads, builds and remote sessions all drop |
 | You run closed-lid, or carry it closed | The moment sleep is prevented, the built-in panel stays lit — macOS never turns the backlight off just because you closed the lid |
-| You brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it is visible to passers-by |
+| You brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it visible to passers-by |
 | You use macOS display sleep | The framebuffer is torn down, screen sharing captures nothing, remote access is effectively dead |
 
-| Method | Screen off | Remote frames | Machine keeps working | Works closed-lid | Permissions |
-|---|:---:|:---:|:---:|:---:|---|
+## How it compares
+
+| | Screen off | Remote frames | Machine keeps working | Works closed-lid | Permissions |
+|---|:--:|:--:|:--:|:--:|---|
 | macOS display sleep | ✅ | ❌ lost | ❌ sleeps | — | none |
 | `pmset displaysleepnow` | ✅ | ❌ lost | ❌ sleeps | — | none |
 | Screensaver / lock screen | ❌ still lit | ✅ | ⚠️ sleeps eventually | — | none |
@@ -38,16 +40,14 @@ macOS wires "display off" and "system asleep" together. You only want the screen
 | Third-party keep-awake apps | ❌ stays lit | ✅ | ✅ | partial | some need grants |
 | **LidKeep** | ✅ | ✅ | ✅ | ✅ | **hotkey needs none** (lid mode needs a one-time helper) |
 
-One row makes all the difference: **LidKeep kills the backlight, not the display's power.** The display never sleeps, so the framebuffer keeps rendering and a remote viewer always sees the real picture instead of a black box.
+The difference is one thing: **LidKeep kills the backlight, not the display's power.** The display never sleeps, so the framebuffer keeps rendering and a remote viewer always sees the real picture instead of a black box.
 
-## Blackout and power plans
+## There are only two menu items
 
-There are only two things in the menu:
-
-| Menu item | What it solves | How to use it |
+| Menu item | What it does | How to use it |
 |---|---|---|
 | **Turn Display Off** | The screen goes dark instantly — backlight cut, not merely dimmed — and the machine keeps running | Click it, or press ⌃⌥⌘B |
-| **Status: … ▸** | Everything else | The title *is* the current status (e.g. `Status: Power · Keep awake`); open it to set each power source separately — the three switches below can all be on at once |
+| **Status: … ▸** | Everything else | The title *is* the current status (e.g. `Status: Power · Keep awake`); open it to set each power source separately — the three switches can all be on at once |
 
 **Power plan** follows the Windows "Power Options" model: plugged in and on battery are two different situations, so each keeps its own settings. Unplug the charger and the Mac moves to the battery plan within a few seconds — **Power / Battery** in the title tells you which one is active.
 
@@ -57,11 +57,7 @@ There are only two things in the menu:
 | **Keep the display on** | Display never sleeps on its own | uses more power |
 | **When the lid closes** | `Sleep` (system default) or `Keep awake` (keeps running, built-in panel off) | "Keep awake" needs the privileged helper; plug in if you can |
 
-Three things to know:
-
-- They are **not** mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both.
-- **Stay awake after the display sleeps** grabs its own anti-sleep assertion the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own.
-- If a plan cannot take effect right now (helper missing, battery below the floor), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten.
+They are not mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both. **Stay awake after the display sleeps** grabs its own anti-sleep assertion the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own. If a plan cannot take effect right now (helper missing, battery below the floor), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten.
 
 ## Three ways people actually use it
 
@@ -83,7 +79,7 @@ Want to read it before running it? Drop the `| bash` and open the file.
 
 | Option | How | Notes |
 |---|---|---|
-| Homebrew | `brew install --cask mihooni/tap/lidkeep` | still run the one-line quarantine fix below |
+| Homebrew | `brew install --cask hoodas101/tap/lidkeep` | still run the one-line quarantine fix below |
 | Installer | download `LidKeep-<version>.pkg` from [Releases](../../releases/latest) and double-click | installs app + CLI in one step; if blocked, right-click → **Open** |
 | DMG | download the `.dmg`, open it, drag the app into Applications | `Install Command-Line Tool.command` inside the image also installs the CLI |
 | Source | `git clone … && cd lidkeep && ./install.sh` | needs Xcode Command Line Tools; `--cli-only` skips the app |
@@ -138,7 +134,7 @@ The product has been called **LidKeep** since v2.0.0, when the CLI name, the app
 **Menu bar app** — click ☀ / 🌙 in the menu bar:
 
 - **Turn Display Off** — black out now, machine keeps running (click again or press the hotkey to restore)
-- **Status: … ▸** — see [Blackout and power plans](#blackout-and-power-plans) above; the title *is* the current status (e.g. `Status: Power · Keep awake`), and it edits whichever plan is active right now
+- **Status: … ▸** — the title *is* the current status (e.g. `Status: Power · Keep awake`), and it edits whichever plan is active right now
 - **Install Privileged Helper (first run)…** — lets "When the lid closes ▸ Keep awake" cover battery and lid (one password prompt)
 - **Settings…** — four tabs: General / Hotkey / Battery / Other
 - **Hotkey Self-test** — synthesizes your hotkey once and verifies the delivery path (no side effects)
@@ -186,12 +182,7 @@ lidkeep nosleep status                 # level / power source / uptime
 lidkeep nosleep off                    # stop and reset
 ```
 
-**Lid-closed anti-sleep**: open **When the lid closes** in the menu bar and pick **Keep awake** — no terminal needed.
-
-- **Closed lid = display off, machine keeps running**: downloads, remote access, external displays and long tasks all keep working
-- **Automatic lid blackout** (since v1.5.2): the daemon polls the SMC lid switch (MSLD key); on lid close it zeroes the built-in display brightness and restores it when the lid opens — the built-in panel only, external displays are never touched; when the daemon stops (battery floor / timeout / manual off) the brightness is restored too, never leaving a black screen behind. Turn it off separately with **Blank the built-in display when the lid closes** on the General tab
-- **Persistent**: the flag is saved in config; the daemon is restored automatically after app or system restarts
-- **Independent of blackout linkage**: the lid daemon and blackout-linked anti-sleep are separate entries in the owner ledger, so toggling one never disturbs the other
+**Lid-closed anti-sleep**: open **When the lid closes** in the menu bar and pick **Keep awake** — no terminal needed. The built-in panel turns off, the machine keeps running, and downloads / remote access / external displays / long tasks all keep going. The daemon polls the SMC lid switch (MSLD key); on lid close it zeroes the built-in display brightness and restores it when the lid opens — the built-in panel only, external displays are never touched; when the daemon stops (battery floor / timeout / manual off) the brightness is restored too, never leaving a black screen behind. Turn it off separately with **Blank the built-in display when the lid closes** on the General tab. The flag is saved in config; the daemon is restored automatically after app or system restarts.
 
 **Why does the system level need a privileged helper?** Per `man caffeinate`, the `-s` assertion is effective **on AC power only**. Covering battery and closed-lid requires `pmset disablesleep`, which must run as root. Install the helper once (asks for your admin password):
 
@@ -281,9 +272,7 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 ## Known limitations
 
 - **Some external displays can't be turned off.** Dimming relies on the software brightness API, which most HDMI/DVI/DP monitors don't support, so those panels stay lit during a blackout. `lidkeep doctor` names the exact display. Powering them down would require true display sleep, which breaks remote frames — this tool deliberately doesn't do that.
-
 - The panel is **not powered down** — this is intentional. Backlight is driven to 0, so the framebuffer keeps rendering and screen-sharing / remote-desktop sessions keep working. True display sleep would break remote access; see [How it works](#how-it-works).
-
 - **Blackout is not a lock screen.** While blacked out, anyone with physical access to the keyboard can still operate the machine — they just can't see it. Lock manually (⌃⌘Q).
 
 ## Support this project
