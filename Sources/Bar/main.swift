@@ -1706,7 +1706,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         AppDelegate.shared?.checkUpdateSilently()
     }
     @objc private func onOpenGitHub(_ sender: Any?) {
-        if let u = URL(string: "https://github.com/Mihooni/lidkeep") {
+        if let u = URL(string: "https://github.com/Hoodas101/lidkeep") {
             NSWorkspace.shared.open(u)
         }
     }
@@ -1806,9 +1806,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let ctl = ScreenController.shared
     private var settings: SettingsPanel?
     // 开源项目地址（检查更新 / 关于 / 跳转共用同一来源）
-    private let repoURL = "https://github.com/Mihooni/lidkeep"
-    private let releasesURL = "https://github.com/Mihooni/lidkeep/releases"
-    private let latestAPI = "https://api.github.com/repos/Mihooni/lidkeep/releases/latest"
+    private let repoURL = "https://github.com/Hoodas101/lidkeep"
+    private let releasesURL = "https://github.com/Hoodas101/lidkeep/releases"
+    private let latestAPI = "https://api.github.com/repos/Hoodas101/lidkeep/releases/latest"
     // 自动检查更新：后台静默轮询，发现新版只在菜单栏提示，不弹窗打断
     private var updateItem: NSMenuItem!
     private var updateSep: NSMenuItem!
@@ -2246,7 +2246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "",
             L("版本") + ": \(LK_VERSION) (\(LK_COMMIT))",
             L("许可证") + ": MIT",
-            L("开源仓库") + ": github.com/Mihooni/lidkeep",
+            L("开源仓库") + ": github.com/Hoodas101/lidkeep",
         ]
         a.informativeText = lines.joined(separator: "\n")
         a.addButton(withTitle: L("在 GitHub 上查看"))

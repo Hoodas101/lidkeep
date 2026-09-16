@@ -934,13 +934,13 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
             errBody = """
             Error: \(m)
             This tool needs that framework to set brightness to 0. Please report your macOS version at
-            https://github.com/Mihooni/lidkeep/issues
+            https://github.com/Hoodas101/lidkeep/issues
             """
         } else {
             errBody = """
             错误：\(m)
             本工具依赖该框架把亮度置 0 实现关屏。请在
-            https://github.com/Mihooni/lidkeep/issues 反馈你的系统版本。
+            https://github.com/Hoodas101/lidkeep/issues 反馈你的系统版本。
             """
         }
         FileHandle.standardError.write(errBody.data(using: .utf8)!)

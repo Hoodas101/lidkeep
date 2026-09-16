@@ -1,7 +1,7 @@
 #!/bin/bash
 # LidKeep 一键安装（给终端用户，不需要 Xcode）
 #
-#   curl -fsSL https://raw.githubusercontent.com/Mihooni/lidkeep/main/install-remote.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
 #
 # 想先看清楚再跑（推荐）：
 #   curl -fsSL .../install-remote.sh -o /tmp/lk.sh && less /tmp/lk.sh && bash /tmp/lk.sh
@@ -11,7 +11,7 @@
 
 set -u
 
-REPO="Mihooni/lidkeep"
+REPO="Hoodas101/lidkeep"
 DEFAULT_VERSION="2.2.2"
 # 实测（2026-09-11，中国大陆）：直连 GitHub Release 资产 10 秒 0 字节，
 # gh-proxy.com 173 KB/s 且 SHA256 与官方 SHA256SUMS 逐字节一致，故作为首选回退。

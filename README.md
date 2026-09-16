@@ -6,7 +6,7 @@
 
 The screen goes pitch black; the machine keeps working. Remote desktop stays connected, downloads keep going, builds keep running. Press a hotkey (or run one command over SSH) and the picture comes straight back.
 
-[![Release](https://img.shields.io/github/v/release/Mihooni/lidkeep)](../../releases/latest)
+[![Release](https://img.shields.io/github/v/release/Hoodas101/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -74,7 +74,7 @@ Three things to know:
 **One line** (looks up the latest release → downloads and verifies `SHA256SUMS` → installs the app and CLI → clears quarantine → launches; falls back to a mirror if GitHub is slow):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Mihooni/lidkeep/main/install-remote.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
 ```
 
 Want to read it before running it? Drop the `| bash` and open the file.
@@ -112,7 +112,7 @@ xattr -dr com.apple.quarantine /Applications/LidKeep.app
 
 ```bash
 shasum -a 256 -c SHA256SUMS                                  # bytes match what was published
-gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # built by this repo's release workflow
+gh attestation verify lidkeep-macos.zip -R Hoodas101/lidkeep   # built by this repo's release workflow
 ```
 
 ### Downloading from mainland China
@@ -123,7 +123,7 @@ Prefix a release URL with `https://gh-proxy.com/` to route the download through 
 
 ```bash
 V=2.2.2
-curl -L -O "https://gh-proxy.com/https://github.com/Mihooni/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
+curl -L -O "https://gh-proxy.com/https://github.com/Hoodas101/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # must match SHA256SUMS from the release
 ```
 

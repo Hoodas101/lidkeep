@@ -6,7 +6,7 @@
 
 屏幕全黑，机器照常运行：远程桌面还在、下载还在、构建还在。按一下热键（或 SSH 里一条命令）立刻恢复画面。
 
-[![Release](https://img.shields.io/github/v/release/Mihooni/lidkeep)](../../releases/latest)
+[![Release](https://img.shields.io/github/v/release/Hoodas101/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#环境要求)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -74,7 +74,7 @@ macOS 把「屏幕灭」和「机器睡」绑在了一起。你想要的只是�
 **一行命令**（查最新版 → 下载并校验 `SHA256SUMS` → 装 App 与 CLI → 清隔离标记 → 启动；GitHub 慢会自动换镜像）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Mihooni/lidkeep/main/install-remote.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
 ```
 
 想先看清楚再跑？去掉 `| bash`，存成文件打开看一眼即可。
@@ -112,7 +112,7 @@ xattr -dr com.apple.quarantine /Applications/LidKeep.app
 
 ```bash
 shasum -a 256 -c SHA256SUMS                                  # 校验文件完整性
-gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # 验证构建来源
+gh attestation verify lidkeep-macos.zip -R Hoodas101/lidkeep   # 验证构建来源
 ```
 
 ### 中国大陆下载
@@ -123,7 +123,7 @@ gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # 验证构建来�
 
 ```bash
 V=2.2.2
-curl -L -O "https://gh-proxy.com/https://github.com/Mihooni/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
+curl -L -O "https://gh-proxy.com/https://github.com/Hoodas101/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # 必须与 Release 里的 SHA256SUMS 一致
 ```
 
