@@ -17,18 +17,10 @@ import IOKit
 import Darwin
 
 // MARK: - 路径
-let home = NSHomeDirectory()
-let base = home + "/Library/Application Support/LidKeep"
-let stateFile = base + "/brightness.state"     // 存在即表示处于黑屏（同时保存待恢复亮度）
 let pidFile = base + "/daemon.pid"             // 一次性 daemon
-let serviceFile = base + "/service.pid"        // 常驻服务
-let configFile = base + "/config.json"         // 持久化热键等配置
 let plistFile = home + "/Library/LaunchAgents/com.lidkeep.agent.plist"
-let logPath = base + "/LidKeep.log"
-let commandFile = base + "/command"        // CLI -> 菜单栏 App 的指令文件
 // 关屏被拒绝（电量过低 / 亮度接口不可用）时，常驻进程把原因写这里，
 // 让发起命令的 CLI 能读到并明确提示用户，而不是只说「指令已发送」。
-let rejectFile = base + "/reject"
 let serviceLog = base + "/service.log"
 let label = "com.lidkeep.agent"
 
@@ -38,14 +30,14 @@ let label = "com.lidkeep.agent"
 // 于是防睡眠分为两层：
 //   Level 1  零权限：caffeinate（仅 AC 时有效，覆盖空闲/显示器睡眠）
 //   Level 2  需 helper（默认不安装）：pmset disablesleep（覆盖电池 + 合盖）
-let nosleepPidFile = base + "/nosleep.pid"          // 防睡眠守护进程
 let nosleepStateFile = base + "/nosleep.state"      // 记录当前层级与开启时间
+// 电量模拟钩子（仅测试用，与 Bar 侧同名常量保持一致的格式）。
+// 守护进程由 App 拉起，拿不到 App 的环境变量，只有文件钩子才能把「合盖 + 电池 + 不睡」
+// 这条最容易耗尽电量的路径真正跑通端到端测试；缺了它，守护自身的电量下限分支
+// 永远只能在接电的机器上「靠读代码相信」。
 let helperDir = "/Library/PrivilegedHelperTools"
-let helperPath = helperDir + "/com.lidkeep.pmset"
-let sudoersPath = "/etc/sudoers.d/lidkeep"
 let resetDaemon = "/Library/LaunchDaemons/com.lidkeep.nosleep.reset.plist"
 
-let fm = FileManager.default
 
 try? fm.createDirectory(atPath: base, withIntermediateDirectories: true)
 
@@ -66,38 +58,16 @@ var execBuf = [CChar](repeating: 0, count: Int(PATH_MAX))
 var execSize = UInt32(execBuf.count)
 _ = _NSGetExecutablePath(&execBuf, &execSize)
 let exePath = String(cString: execBuf)
-@discardableResult func sh(_ exe: String, _ a: [String]) -> Int32 {
-    let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = a
-    p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
-    try? p.run(); p.waitUntilExit(); return p.terminationStatus
-}
-/// 捕获 stdout。必须先读再 waitUntilExit：子进程输出超过管道缓冲时，
-/// 先等待会与子进程互相阻塞形成死锁。
-func runCapture(_ exe: String, _ a: [String]) -> String? {
-    let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = a
-    p.standardInput = FileHandle.nullDevice
-    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-    do { try p.run() } catch { return nil }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    p.waitUntilExit()
-    return String(data: data, encoding: .utf8)
-}
 
 // MARK: - 进程归属校验
 // 仅用 kill(pid,0) 判断进程存活是不够的：进程退出后 pid 会被系统复用，
 // 此时向该 pid 发 SIGUSR1 会打到无关进程上（SIGUSR1 默认动作是终止！）。
-// 因此必须核对 pid 对应的可执行文件路径确实属于 lidkeep。
-func procPath(_ pid: Int32) -> String? {
-    var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
-    let n = proc_pidpath(pid, &buf, UInt32(buf.count))
-    return n > 0 ? String(cString: buf) : nil
-}
-/// 取不到路径时返回 true（保持原有行为，避免因权限等因素误判导致功能不可用）
-func isOurs(_ pid: Int32) -> Bool {
-    guard let p = procPath(pid) else { return true }
-    // 同时覆盖 /opt/homebrew/bin/lidkeep 与 .../LidKeep.app/.../LidKeep
-    return p.lowercased().contains("lidkeep")
-}
+// 因此必须核对 pid 对应的**可执行文件**确实属于 lidkeep。
+//
+// 判定实现统一放在 Sources/Shared/Ownership.swift，Bar 与 CLI 共用同一份 ——
+// 这处逻辑曾经各写一遍，结果两边都用了「在整条命令行里找子串」的写法，
+// 于是「命令行里提到过这个路径」的无关进程会被误判为自家人并被 kill。
+func isOurs(_ pid: Int32) -> Bool { pidIsProbablyOurs(pid) }
 
 // MARK: - 轮询等待（比固定 usleep 可靠：慢机器上不会误判超时）
 func waitUntil(timeout: TimeInterval, _ predicate: () -> Bool) -> Bool {
@@ -109,167 +79,28 @@ func waitUntil(timeout: TimeInterval, _ predicate: () -> Bool) -> Bool {
     return predicate()
 }
 
-// MARK: - 配置（常驻服务经 launchd 启动，无法传命令行参数，故持久化）
-// 与 LidKeep.app 共用同一个 config.json；字段全部可缺省，旧版文件仍能读取
-let MOD_CTRL: UInt64  = 1 << 18
-let MOD_ALT: UInt64   = 1 << 19
-let MOD_CMD: UInt64   = 1 << 20
-let MOD_SHIFT: UInt64 = 1 << 17
+// MARK: - 配置（结构与版本号见 Sources/Shared/Config.swift，两端同一份）
 
-struct Config: Codable {
-    var keyCode: Int64 = 11                                  // B
-    var modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_CMD      // 默认 ⌃⌥⌘
-    var timeout: Double = 43200                              // 一次性模式安全兜底，秒；0 = 不限
-    var restoreFixed: Float? = nil                           // nil = 恢复进入黑屏前的亮度
-    var batteryFloor: Int = 20                               // 电量下限 %，0 = 不限制
-    /// 触底时做什么，见 BatteryAction；0 = 只恢复屏幕。由菜单栏 App 使用，CLI 必须镜像。
-    var batteryAction: Int = 0
-    /// 是否注册全局热键。由菜单栏 App 使用，CLI 必须镜像。
-    var hotkeyEnabled: Bool = true
-    var autoNosleep: Bool = false                            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
-    // 合盖不睡眠长期模式：菜单栏 App 菜单一键管理
-    var lidAwake: Bool = false
-    // 合盖时熄灭内屏。与 lidAwake 分离：熄屏由合盖守护执行，
-    // 关掉它则合盖只保持机器运转、内屏维持原亮度（熄屏异常时的退路）。
-    var lidBlackout: Bool = true
-    var lang: String = "auto"                             // 界面语言：auto=跟随系统 / zh / en
-    var keepDisplayOn: Bool = false                       // 保持屏幕常亮：阻止显示器自动睡眠（caffeinate -d）
-    /// 配置结构版本。旧配置没有这个字段 → 读出 0 → 走 migrate() 补齐语义。
-    /// 借鉴 WorkBuddy 的 parsePowerSaveBlockerMode：字段语义一旦变过，老配置必须能被纠正，
-    /// 而不是沿用写盘时的旧含义。
-    var schemaVersion: Int = 0
-    /// 以下两项由菜单栏 App 使用（自动检查更新）。CLI 不参与检查，但**必须镜像**：
-    /// 两侧共写同一个 config.json，CLI 落盘时用自身 CodingKeys 编码，缺字段就会被抹掉。
-    var autoCheckUpdate: Bool = true
-    var lastUpdateCheckAt: Double = 0
-
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, batteryAction, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion, autoCheckUpdate, lastUpdateCheckAt, hotkeyEnabled }
-    init() {}
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        keyCode = try c.decodeIfPresent(Int64.self, forKey: .keyCode) ?? 11
-        modFlags = try c.decodeIfPresent(UInt64.self, forKey: .modFlags) ?? (MOD_CTRL | MOD_ALT | MOD_CMD)
-        timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
-        restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
-        batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
-        batteryAction = try c.decodeIfPresent(Int.self, forKey: .batteryAction) ?? 0
-        hotkeyEnabled = try c.decodeIfPresent(Bool.self, forKey: .hotkeyEnabled) ?? true
-        autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
-        lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
-        lidBlackout = try c.decodeIfPresent(Bool.self, forKey: .lidBlackout) ?? true
-        lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
-        keepDisplayOn = try c.decodeIfPresent(Bool.self, forKey: .keepDisplayOn) ?? false
-        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
-        autoCheckUpdate = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdate) ?? true
-        lastUpdateCheckAt = try c.decodeIfPresent(Double.self, forKey: .lastUpdateCheckAt) ?? 0
-    }
-    /// 逐版本升级旧配置。返回 true 表示有改动、需要回写。
-    /// 只由 loadConfig() 调用一次：init 里跑过的话，loadConfig 再跑会因版本已最新而无从判断是否该回写。
-    @discardableResult
-    mutating func migrate() -> Bool {
-        guard schemaVersion < configSchemaVersion else { return false }
-        if schemaVersion < 1 {
-            // v0 → v1：合盖熄屏从「隐含在 lidAwake 里」拆成独立开关。
-            // 之前开着合盖模式的用户，行为必须维持不变（合盖即熄屏）。
-            if lidAwake { lidBlackout = true }
-            schemaVersion = 1
-        }
-        return true
+/// "on"/"off"/"true"/"false" → Bool，非法值返回 nil（调用方负责报错退出）
+func onOff(_ s: String) -> Bool? {
+    switch s.lowercased() {
+    case "on", "true", "1", "yes": return true
+    case "off", "false", "0", "no": return false
+    default: return nil
     }
 }
 
-/// 配置结构的当前版本。新增字段若带安全默认值（decodeIfPresent ?? x）就不必 bump；
-/// 只有「同一字段换了语义」或「需要按旧值推导新值」时才 bump 并在 migrate() 里补一步。
-let configSchemaVersion = 1
-
-func loadConfig() -> Config {
-    if let d = try? Data(contentsOf: URL(fileURLWithPath: configFile)),
-       var c = try? JSONDecoder().decode(Config.self, from: d) {
-        if c.migrate() { saveConfig(c) }     // 迁移结果落盘，避免每次启动重复迁移
-        return c
-    }
-    var c = Config(); c.schemaVersion = configSchemaVersion
-    return c
+/// 打印两套电源方案，并标明此刻生效的是哪一套
+func printPlans(_ c: Config) {
+    let onBat = batteryStatus().onBattery
+    print((L("  接通电源: ") + "\(c.planAC.summary)"))
+    print((L("  使用电池: ") + "\(c.planBattery.summary)"))
+    print((L("  当前生效: ") + (onBat ? L("使用电池") : L("接通电源")) + L(" —— ")
+           + (onBat ? c.planBattery : c.planAC).summary))
+    print(L("  修改: lidkeep plan --ac --keep-awake on --lid nothing"))
 }
 
-/// 原子写：先写同目录临时文件再 rename。
-/// 菜单栏 App 与 CLI 守护会写同一个 config.json，直接覆盖会在崩溃/并发瞬间留下半截 JSON，
-/// 下一次读出空配置（热键回到默认、模式全关）——这类故障极难复现，必须一开始就排除。
-func saveConfig(_ c: Config) {
-    guard let d = try? JSONEncoder().encode(c) else { return }
-    let tmp = configFile + ".tmp.\(getpid())"
-    do {
-        try d.write(to: URL(fileURLWithPath: tmp))
-        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tmp)
-        if rename(tmp, configFile) != 0 { try? fm.removeItem(atPath: tmp) }
-    } catch {
-        try? fm.removeItem(atPath: tmp)
-    }
-}
-
-// MARK: - 亮度读写 (DisplayServices 私有框架)
-let dsHandle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_NOW)
-typealias DSGet = @convention(c) (UInt32, UnsafeMutablePointer<Float>) -> Int32
-typealias DSSet = @convention(c) (UInt32, Float) -> Int32
-
-// DisplayServices 是可移除的私有框架：一旦 Apple 在新系统里拿掉它，所有亮度操作都会静默失效。
-// 显式暴露可用状态，让 status / 黑屏入口都能明确报错，而不是「命令成功但屏幕没变化」。
-var dsAvailable: Bool {
-    guard let h = dsHandle else { return false }
-    return dlsym(h, "DisplayServicesGetBrightness") != nil
-        && dlsym(h, "DisplayServicesSetBrightness") != nil
-}
-
-/// 所有在线显示器。
-/// 只操作 CGMainDisplayID() 会漏掉外接显示器——用户要的是「关屏」，那必须是所有屏。
-func onlineDisplays() -> [CGDirectDisplayID] {
-    var count: UInt32 = 0
-    guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [CGMainDisplayID()] }
-    var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-    CGGetOnlineDisplayList(count, &ids, &count)
-    return ids.prefix(Int(count)).isEmpty ? [CGMainDisplayID()] : Array(ids.prefix(Int(count)))
-}
-
-/// 上一次设置亮度时失败的显示器。多数 HDMI / DVI 外接屏不支持软件亮度，
-/// 这类屏幕关不掉，必须让用户看见，而不是让他以为一切正常。
-var lastFailedDisplays: [CGDirectDisplayID] = []
-
-func setOneBrightness(_ id: CGDirectDisplayID, _ v: Float) -> Bool {
-    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
-    return unsafeBitCast(p, to: DSSet.self)(id, v) == 0
-}
-
-func readBrightness() -> Float {
-    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") else { return -1 }
-    let f = unsafeBitCast(p, to: DSGet.self)
-    var v: Float = -1
-    return f(CGMainDisplayID(), &v) == 0 ? v : -1
-}
-// 返回 false = 设置失败（实测该 API 成功时返回 0）。调用方必须据此提示用户，
-// 否则用户会以为关屏成功、实际屏幕还亮着。
-// 遍历所有在线显示器：只关主屏会让外接屏继续亮着，等于没关。
-@discardableResult
-func setBrightness(_ v: Float) -> Bool {
-    var ok = false
-    var failed: [CGDirectDisplayID] = []
-    for id in onlineDisplays() {
-        if setOneBrightness(id, v) { ok = true } else { failed.append(id) }
-    }
-    lastFailedDisplays = failed
-    return ok
-}
-/// 恢复必须尽最大努力成功：失败意味着用户永远看不见屏幕。
-/// 因此多次重试（间隔递增），而不是「设一次就走」。
-@discardableResult
-func restoreBrightness(_ v: Float) -> Bool {
-    for i in 0..<6 {
-        var ok = false
-        for id in onlineDisplays() { if setOneBrightness(id, v) { ok = true } }
-        if ok { return true }
-        usleep(UInt32(150_000 * (i + 1)))
-    }
-    return false
-}
+// loadConfig() / saveConfig() / updateConfig() 见 Sources/Shared/Config.swift
 
 // MARK: - 内屏亮度（合盖熄屏专用，只动内屏，不碰外接屏）
 //
@@ -293,34 +124,7 @@ func builtinBrightness() -> Float {
     return unsafeBitCast(p, to: DSGet.self)(id, &v) == 0 ? v : -1
 }
 
-// MARK: - 电池状态与通知
-// pmset -g batt 免任何授权。只有「电池供电且正在放电」才算有耗尽风险：
-// 插着电时哪怕电量低也不会耗尽，此时阻止用户关屏毫无意义。
-struct Battery { var onBattery = false, discharging = false, percent = 100 }
-
-func batteryStatus() -> Battery {
-    var b = Battery()
-    // 测试钩子：LK_SIMULATE_BATTERY="电量,batt|ac,discharging|charging"
-    // 例: LK_SIMULATE_BATTERY="15,batt,discharging" lidkeep off
-    // 仅供验证电量保护路径（插电的机器无法真实触发），正式使用不需要也不读取它。
-    if let sim = ProcessInfo.processInfo.environment["LK_SIMULATE_BATTERY"] {
-        let parts = sim.lowercased().split(separator: ",").map(String.init)
-        if let p = parts.first, let v = Int(p), (0...100).contains(v) {
-            b.percent = v
-            b.onBattery = parts.contains("batt")
-            b.discharging = parts.contains("discharging")
-            return b
-        }
-    }
-    guard let out = runCapture("/usr/bin/pmset", ["-g", "batt"]), !out.isEmpty else { return b }
-    b.onBattery = out.contains("Battery Power")
-    b.discharging = out.range(of: "discharging", options: .caseInsensitive) != nil
-    for tok in out.split(whereSeparator: { " \t\n;".contains($0) }) {
-        if tok.hasSuffix("%"), let v = Int(tok.dropLast()) { b.percent = v; break }
-    }
-    return b
-}
-
+// MARK: - 用户通知（osascript，免授权）
 func notify(_ msg: String) {
     let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     _ = runCapture("/usr/bin/osascript", ["-e", "display notification \"\(safe)\" with title \"LidKeep\""])
@@ -449,35 +253,6 @@ final class SMCLid {
 //   * 开机强制复位：disablesleep 是持久全局设置，崩溃/卸载后若不复位会把系统
 //     永久留在「永不睡眠」状态（本机 Amphetamine 就是活证据：SleepDisabled=1、7 天未睡眠）
 
-/// 两个文件齐全才算已安装。只查文件会出现「装了一半」却静默降级的情况。
-/// 注意 sudoers 只判存在、不能读内容：0440 root:wheel 对普通用户不可读，读会误判未安装。
-func helperInstalled() -> Bool {
-    guard fm.isExecutableFile(atPath: helperPath),
-          fm.fileExists(atPath: sudoersPath) else { return false }
-    return true
-}
-
-/// 提权助手版本是否过旧：带「持有者记账」的版本 detect 输出会带 owners= 字段。
-/// 旧版没有记账 —— 关屏联动与手动防睡眠会互相踩掉对方的 disablesleep。
-func helperOutdated() -> Bool {
-    guard helperInstalled(), let d = helperExec("detect") else { return false }
-    return !d.contains("owners=")
-}
-
-/// 经 sudo -n 调用 helper。arg 走白名单，杜绝参数注入。
-/// 返回 nil = 不可用（未安装 / 授权失效 / pmset 已移除该选项），调用方必须据此降级并告知用户。
-func helperExec(_ arg: String) -> String? {
-    guard ["on", "off", "status", "detect"].contains(arg), helperInstalled() else { return nil }
-    return runCapture("/usr/bin/sudo", ["-n", helperPath, arg])?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-}
-
-/// 系统级防睡眠当前是否真的生效（回读真实状态，不靠自己记的标志）
-func systemSleepDisabled() -> Bool {
-    guard let s = helperExec("status"), let v = Int(s) else { return false }
-    return v == 1
-}
-
 /// 把脚本交给 root 执行（触发系统密码框）。脚本先落盘再执行，避免 shell 多层转义出错。
 func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
     // 落在自己的状态目录（仅当前用户可写），而不是 /tmp。
@@ -520,6 +295,51 @@ func nosleepPid() -> Int32? {
     return pid
 }
 
+/// 当前还活着的、属于本程序的 nosleep 守护。**不只**看 pid 文件——
+/// 正因为「pid 文件只有一个、进程可以有很多」才出过事，见 takeOverStaleDaemons。
+///
+/// 枚举走进程内的 `allPids()`，**不要换成 spawn `pgrep`**：exec 被策略拒掉时会静默返回空，
+/// 于是「一个守护都没有」和「根本没看成」变成同一个结果，所有守卫一起空转。
+func ourDaemonPids() -> [Int32] {
+    let me = ProcessInfo.processInfo.processIdentifier
+    var res: [Int32] = []
+    for pid in allPids() where pid != me {
+        // 顺序有讲究：先按可执行文件筛（最严，也最便宜），只有自家二进制才去读命令行。
+        // 反过来会对系统里每个进程都读一遍 argv —— 既慢（每个都要分配 KERN_PROCARGS2 全量缓冲）
+        // 又没必要，而这一步的唯一目的是「准备 kill」，本来就该以归属为准入。
+        guard pidIsOurExecutable(pid) else { continue }                            // 归属
+        guard procCommandLine(pid).contains("nosleep-daemon") else { continue }    // 角色
+        res.append(pid)
+    }
+    return res
+}
+
+/// 收掉遗留守护，返回收掉的数量。`keeping` 指定的那个（通常是 pid 文件认可的在跑守护）会保留。
+///
+/// 为什么必须有这道守卫：守护启动时会把自身 pid 写进 `nosleep.pid`。只要允许两个实例
+/// 并存，后启动的那个就会把先启动的 pid 覆盖掉 —— 先启动的从此既不在 pid 文件里、
+/// 也没人认领，`nosleep off` 永远找不到它，它会一直持有 `caffeinate -is`，
+/// 于是这台机器再也睡不着，而用户在界面上看到的是「防睡眠已关闭」。
+/// 本机实测残留过 5 个（最早一个是四天前已删除的 blankscreen 留下的）。
+///
+/// 先 SIGTERM 再等：守护收到信号会走正常收尾（恢复内屏亮度、复位 disablesleep），
+/// SIGKILL 只留给赖着不走的，那条路径上的收尾由下次启动的 recoverStaleNosleep 兜底。
+@discardableResult
+func takeOverStaleDaemons(graceful: TimeInterval = 5.0, keeping keepPid: Int32? = nil) -> Int {
+    let stale = ourDaemonPids().filter { $0 != keepPid }
+    guard !stale.isEmpty else { return 0 }
+    for pid in stale {
+        log(L("nosleep: 收掉遗留的守护进程 pid=") + "\(pid)")
+        kill(pid, SIGTERM)
+    }
+    _ = waitUntil(timeout: graceful) { stale.allSatisfy { kill($0, 0) != 0 } }
+    for pid in stale where kill(pid, 0) == 0 {
+        log(L("nosleep: 守护 pid=") + "\(pid)" + L(" 未响应停止指令，强制结束"))
+        kill(pid, SIGKILL)
+    }
+    return stale.count
+}
+
 func nosleepInfo() -> NosleepInfo? {
     guard nosleepPid() != nil,
           let s = try? String(contentsOfFile: nosleepStateFile, encoding: .utf8) else { return nil }
@@ -554,7 +374,10 @@ func thirdPartySleepHolder() -> String? {
 /// 判定口径也是如此，不能出现「doctor 报错、推荐的修复命令却不生效」的自相矛盾。
 /// 例外：远控软件在持有该开关时（见 thirdPartySleepHolder）绝不复位。
 func recoverStaleNosleep() {
-    guard nosleepPid() == nil else { return }
+    // 「有没有守护在跑」不能只看 pid 文件：pid 文件可能被后来者覆盖、也可能被手删，
+    // 而守护还活着。只看文件就会把活着的守护所依赖的 disablesleep 复位掉——
+    // 用户看到的是一切正常，实际「合盖不睡」已经静默失效。
+    guard nosleepPid() == nil, ourDaemonPids().isEmpty else { return }
     try? fm.removeItem(atPath: nosleepPidFile)
     try? fm.removeItem(atPath: nosleepStateFile)
     guard helperInstalled(), systemSleepDisabled() else { return }
@@ -805,6 +628,11 @@ func uninstallHelperScript() -> String {
 var nosleepStopFlag = false   // 信号处理只置位，收尾在主循环做（AppKit 下 GCD 交付不可靠）
 
 func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
+    // 单实例守卫，必须放在最前面、且在写 pid 之前：
+    // 两个守护并存 = 后者覆盖前者的 pid = 前者永远关不掉、永久持有防睡眠断言。
+    // 放在这里而不是只放在 spawnNosleepDaemon，是因为守护也可能被直接拉起。
+    // 宽限期取 3s：父进程在等我们写 pid，收尾拖太久会让它误判「启动失败」。
+    _ = takeOverStaleDaemons(graceful: 3.0)
     let cfg = loadConfig()
     let myPid = ProcessInfo.processInfo.processIdentifier
     var systemOn = false
@@ -1015,9 +843,21 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
 
 /// 合盖模式的持久标志。凡防睡眠自动结束（电量 / 超时 / 手动 off）都必须清除，
 /// 否则菜单栏 App 会在下次启动时把它当作仍然想要的模式重新拉起。
+/// 关闭防睡眠时必须**同时**把「当前电源来源那套方案」的合盖项归位。
+///
+/// 只清 lidAwake 是不够的：方案里还写着 lid=nothing，菜单栏 App 一重投影
+/// 就把标志改回 true，并把守护重新拉起来——用户刚敲的 `nosleep off` 被静默撤销，
+/// 而当 App 没在跑时又确实关掉了，于是「同一命令，结果取决于 App 是否常驻」。
 func clearLidAwake() {
     var c = loadConfig()
-    if c.lidAwake { c.lidAwake = false; saveConfig(c) }
+    var dirty = false
+    if c.lidAwake { c.lidAwake = false; dirty = true }
+    if batteryStatus().onBattery {
+        if c.planBattery.lid != .sleep { c.planBattery.lid = .sleep; dirty = true }
+    } else if c.planAC.lid != .sleep {
+        c.planAC.lid = .sleep; dirty = true
+    }
+    if dirty { saveConfig(c) }
 }
 
 /// fork 自身启动 nosleep-daemon 并等待确认（stdio 必须全部丢弃，
@@ -1030,30 +870,20 @@ func spawnNosleepDaemon(wantSystem: Bool, timeout: TimeInterval?) -> (pid: Int32
     p.executableURL = URL(fileURLWithPath: exePath)
     p.arguments = a
     p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
+    let before = nosleepPid()
     do { try p.run() } catch {
         FileHandle.standardError.write((L("启动防睡眠守护进程失败: ") + "\(error)" + "\n").data(using: .utf8)!)
         return nil
     }
-    _ = waitUntil(timeout: 5.0) { nosleepPid() != nil }
+    // 必须等「新的」pid 出现：遗留守护的 pid 可能还躺在 pid 文件里，
+    // 只等「非空」会拿到旧进程当成自己刚启动的那个（后面的清理与状态显示全跑偏）。
+    // 超时给 10s：新守护启动前要先收掉遗留实例（最多 3s），5s 会误判为启动失败。
+    _ = waitUntil(timeout: 10.0) { let now = nosleepPid(); return now != nil && now != before }
     if let pid = nosleepPid(), let info = nosleepInfo() { return (pid, info) }
     return nil
 }
 
 // 常用键位名（仅用于展示）
-let keyTable: [(String, Int64)] = [    ("A", 0), ("B", 11), ("C", 8), ("D", 2), ("E", 14), ("F", 3), ("G", 5), ("H", 4),
-    ("I", 34), ("J", 38), ("K", 40), ("L", 37), ("M", 46), ("N", 45), ("O", 31), ("P", 35),
-    ("Q", 12), ("R", 15), ("S", 1), ("T", 17), ("U", 32), ("V", 9), ("W", 13), ("X", 7),
-    ("Y", 16), ("Z", 6), ("F13", 105), ("Space", 49)
-]
-func keyName(_ code: Int64) -> String { keyTable.first { $0.1 == code }?.0 ?? "keyCode \(code)" }
-func modsText(_ flags: UInt64) -> String {
-    var s = ""
-    if flags & MOD_CTRL  != 0 { s += "⌃" }
-    if flags & MOD_ALT   != 0 { s += "⌥" }
-    if flags & MOD_SHIFT != 0 { s += "⇧" }
-    if flags & MOD_CMD   != 0 { s += "⌘" }
-    return s.isEmpty ? L("（无修饰键）") : s
-}
 
 // MARK: - 全局热键（Carbon Event Manager，无需任何系统授权）
 // 说明：曾用 CGEventTap 监听全局按键，那条链路强制要求「输入监控」授权，
@@ -1061,30 +891,12 @@ func modsText(_ flags: UInt64) -> String {
 // RegisterEventHotKey 由 WindowServer 直接派发，零授权、重装不失效。
 // 注意：Carbon 热键事件只在 NSApplication 事件循环中派发，daemon/service
 // 必须经 runAppLoop() 启动（裸 RunLoop 收不到）。
-var carbonHotKeyRef: EventHotKeyRef?
-var carbonHandlerRef: EventHandlerRef?
-var carbonFire: (() -> Void)?
+// 注册动作本身见 Sources/Shared/SystemState.swift —— 两端共用一份，
+// 这里只负责把结果写进日志（CLI 是 stdout，Bar 是日志文件，措辞不必一致）。
 
 func installHotkey(keyCode: Int64, modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_CMD, fire: @escaping () -> Void) {
     carbonFire = fire
-    if carbonHandlerRef == nil {
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                 eventKind: UInt32(kEventHotKeyPressed))
-        let st = InstallEventHandler(GetEventDispatcherTarget(),
-            { _, _, _ -> OSStatus in
-                DispatchQueue.main.async { carbonFire?() }
-                return noErr
-            }, 1, &spec, nil, &carbonHandlerRef)
-        guard st == noErr else { log((L("热键事件处理器安装失败 status=") + "\(st)")); return }
-    }
-    if let old = carbonHotKeyRef { UnregisterEventHotKey(old); carbonHotKeyRef = nil }
-    var m: UInt32 = 0
-    if modFlags & MOD_CMD   != 0 { m |= UInt32(cmdKey) }
-    if modFlags & MOD_SHIFT != 0 { m |= UInt32(shiftKey) }
-    if modFlags & MOD_ALT   != 0 { m |= UInt32(optionKey) }
-    if modFlags & MOD_CTRL  != 0 { m |= UInt32(controlKey) }
-    let hid = EventHotKeyID(signature: 0x424C4E4B, id: 1)   // 'BLNK'
-    let st = RegisterEventHotKey(UInt32(keyCode), m, hid, GetEventDispatcherTarget(), 0, &carbonHotKeyRef)
+    let st = registerCarbonHotKey(keyCode: keyCode, modFlags: modFlags)
     if st == noErr {
         log((L("全局热键已注册 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + L("（Carbon 链路，无需授权）")))
     } else if st == OSStatus(eventHotKeyExistsErr) {
@@ -1512,20 +1324,6 @@ func startOneShotDaemon(extra: [String]) -> Int32 {
     return 1
 }
 
-/// 父进程已经消失的 caffeinate —— 真的孤儿（正常 caffeinate -w 会随父进程自动退出）。
-/// 刻意不把「父进程不是 lidkeep」算作孤儿：用户自己起的 caffeinate 不该被误报。
-func orphanCaffeinate() -> [Int32] {
-    guard let out = runCapture("/usr/bin/pgrep", ["-x", "caffeinate"]) else { return [] }
-    var res: [Int32] = []
-    for tok in out.split(separator: "\n") {
-        guard let pid = Int32(tok.trimmingCharacters(in: .whitespaces)) else { continue }
-        guard let pp = runCapture("/bin/ps", ["-o", "ppid=", "-p", String(pid)]),
-              let ppid = Int32(pp.trimmingCharacters(in: .whitespaces)) else { continue }
-        if kill(ppid, 0) != 0 { res.append(pid) }
-    }
-    return res
-}
-
 /// 综合自检：把「能不能关屏、谁在跑、有没有残留」一次性摆出来。
 /// 退出码 0 = 无致命问题，1 = 存在必须修复的问题（供脚本与 CI 使用）。
 struct PowerAssertion {
@@ -1550,11 +1348,18 @@ func capture(_ s: String, _ pattern: String, group: Int = 1) -> String? {
 /// caffeinate 的断言名恒为 "caffeinate command-line tool"，与任何第三方 caffeinate
 /// 完全无法区分（正如 WorkBuddy 与小米互联服务的断言都叫 "Electron"）。因此改从
 /// 亲缘关系判定：父进程是 lidkeep 家族即视为本程序持有。
+///
+/// 父进程的身份同样只能看**可执行文件**（proc_pidpath），不能看命令行 ——
+/// 否则「命令行里提到过 lidkeep 路径」的无关父进程会被误标成我们持有的断言，
+/// doctor 会把第三方占用报成自家。判定实现见 Sources/Shared/Ownership.swift。
+///
+/// 读父进程也必须走进程内（`procPpid`），不能 spawn `ps -o ppid=`：受限环境（含本机
+/// `make test`）会拒绝 setuid 程序，`ps` 被拒时这里返回 false —— 结果是**本程序自己
+/// 持有的 caffeinate 全被列成「其他持有者」**，同时 doctor 还给出一句
+/// 「配置要求防睡眠，但当前没有任何断言在生效中」的自相矛盾提示。
 func assertionOwnerIsOurs(_ pid: Int32) -> Bool {
-    guard let pps = runCapture("/bin/ps", ["-o", "ppid=", "-p", String(pid)]),
-          let ppid = Int32(pps.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
-    let cmd = runCapture("/bin/ps", ["-o", "command=", "-p", String(ppid)]) ?? ""
-    return cmd.contains("lidkeep") || cmd.contains("LidKeep")
+    guard let ppid = procPpid(pid) else { return false }
+    return pidIsOurExecutable(ppid)
 }
 
 /// 当前系统里所有「阻止睡眠」的断言持有者 —— 用户问「谁不让我的 Mac 睡」时的唯一权威答案。
@@ -1674,6 +1479,17 @@ func runDoctor() -> Int32 {
                 print(L("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `lidkeep nosleep off` 复位"))
             }
         }
+        // 守护必须唯一。多个实例并存时 `nosleep off` 只能关掉 pid 文件里那个，
+        // 其余成为收不掉的孤儿，各自持有 caffeinate 让系统一直不睡——
+        // 用户看到的是「防睡眠已关闭」，机器却在发热放电（实测残留过 5 个）。
+        let daemons = ourDaemonPids()
+        if daemons.count > 1 || (daemons.count == 1 && nosleepPid() == nil) {
+            errors.append(L("多个防睡眠守护并存"))
+            print((L("  ❌ 防睡眠守护有 ") + "\(daemons.count)" + L(" 个实例在跑：")
+                   + daemons.map { "\($0)" }.joined(separator: ", ")))
+            print(L("     它们各自持有防睡眠断言，`nosleep off` 只能关掉其中一个 —— 系统会一直不睡"))
+            print(L("     → 一键清理：lidkeep nosleep off"))
+        }
     } else {
         print(L("  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠"))
         print(L("     → 一键安装：lidkeep nosleep setup"))
@@ -1716,17 +1532,6 @@ func runDoctor() -> Int32 {
         lid.close()
     } else {
         print(L("  ⚠️  SMC 合盖检测不可用（台式机 / 虚拟机属正常；合盖熄屏功能将自动禁用）"))
-    }
-
-    print(L("\n【残留进程】"))
-    let orphans = orphanCaffeinate()
-    if orphans.isEmpty {
-        print(L("  ✅ 无孤儿 caffeinate"))
-    } else {
-        warns.append(L("孤儿 caffeinate"))
-        for o in orphans {
-            print(("  ⚠️  caffeinate pid=" + "\(o)" + L(" 的父进程已不存在，属崩溃残留：kill ") + "\(o)"))
-        }
     }
 
     print("")
@@ -1859,9 +1664,25 @@ case "nosleep":
     case "on":
         recoverStaleNosleep()
         if let pid = nosleepPid() {
+            // 已在跑也要顺手清掉**别的**遗留实例：只报一句「已在运行」就退出去的话，
+            // pid 文件之外的孤儿永远不会被发现，它们各自持有的 caffeinate
+            // 会让系统一直不睡，而界面上看起来一切正常。
+            let extra = takeOverStaleDaemons(keeping: pid)
+            if extra > 0 { print((L("另清理了 ") + "\(extra)" + L(" 个遗留守护进程"))) }
             print((L("防睡眠已在运行 pid=") + "\(pid)" + L("（用 `lidkeep nosleep off` 关闭）")))
             exit(0)
         }
+        // pid 文件缺失 **不等于** 没有守护在跑。pid 文件被后来者覆盖、或被误删时，
+        // 旧守护依然活着并持有 caffeinate / disablesleep；此时若直接往下 spawn，
+        // 两个实例会并存，旧的那个从此既不在 pid 文件里、也没人认领 ——
+        // `nosleep off` 永远找不到它，这台机器再也睡不着，而界面显示的是「防睡眠已关闭」。
+        //
+        // 所以「准备新起一个」这条路径也必须先收掉遗留实例。**这条分支原来漏了这一步**
+        // （只在上面「已在运行」的分支里收），本机可稳定复现：删掉 nosleep.pid →
+        // `nosleep on --system` → 出现 2 个守护，且 `off` 只收走新的那个。
+        // 这里传 keeping: nil —— 此刻还没有任何实例值得保留。
+        let staleBeforeSpawn = takeOverStaleDaemons()
+        if staleBeforeSpawn > 0 { print((L("另清理了 ") + "\(staleBeforeSpawn)" + L(" 个遗留守护进程"))) }
         var wantSystem = false
         var nsTimeout: TimeInterval? = nil
         var i = 3
@@ -1958,21 +1779,43 @@ case "nosleep":
         guard let pid = nosleepPid() else {
             // 守护进程没了但全局开关可能还开着——这是必须补救的残留态
             recoverStaleNosleep()
+            let stale = takeOverStaleDaemons()
+            if stale > 0 { print((L("另清理了 ") + "\(stale)" + L(" 个遗留守护进程"))) }
             print(L("防睡眠未在运行"))
             exit(0)
         }
         try? fm.removeItem(atPath: nosleepStateFile)
         kill(pid, SIGTERM)
-        let gone = waitUntil(timeout: 5.0) { nosleepPid() == nil }
+        _ = waitUntil(timeout: 5.0) { nosleepPid() == nil }
+        // pid 文件之外还可能有遗留守护（pid 被后来者覆盖过的那些）。
+        // 「关闭」必须真的关干净：只清 pid 文件里的那个，用户会看到「已关闭」
+        // 而系统仍被剩下的 caffeinate -is 挡着不睡，那是最难查的一类故障。
+        let stale = takeOverStaleDaemons()
+        if stale > 0 { print((L("另清理了 ") + "\(stale)" + L(" 个遗留守护进程"))) }
+        let gone = ourDaemonPids().isEmpty
         print(gone ? L("防睡眠已关闭") : (L("已发送停止指令（5s 内未确认，请查看 ") + "\(logPath)" + L("）")))
         if !gone { exit(1) }
 
     case "status":
         let b = batteryStatus()
         let helper = helperInstalled()
-        print((L("防睡眠: ") + "\(nosleepPid() != nil ? L("已开启") : L("未开启"))"))
-        print((L("  合盖模式: ") + "\(loadConfig().lidAwake ? L("开（重启后自动恢复）") : L("关"))" + L("（菜单栏 App 可一键开关）")))
-        if loadConfig().lidAwake, nosleepPid() != nil {
+        let cfgNow = loadConfig()
+        let lidRunning = nosleepPid() != nil
+        print((L("防睡眠: ") + "\(lidRunning ? L("已开启") : L("未开启"))"))
+        // 以「守护是否真的在跑」为准，而不是配置里的意图值。
+        // 配置写着合盖不睡、守护却没起来（App 没运行 / 助手被卸载）时，
+        // 报一句「开」会让用户带着「合盖也不会睡」的预期把机器塞进包里。
+        let lidText: String
+        if lidRunning {
+            lidText = cfgNow.lidAwake ? L("开（守护运行中，重启后自动恢复）") : L("开（由手动防睡眠持有）")
+        } else if cfgNow.lidAwake {
+            lidText = L("未生效（配置要求合盖运行，但守护未启动 —— 打开菜单栏 App 即可恢复）")
+        } else {
+            lidText = L("关")
+        }
+        print((L("  合盖模式: ") + lidText))
+        if cfgNow.lidAwake || lidRunning { printPlans(cfgNow) }
+        if lidRunning {
             let lid = SMCLid()
             if lid.open(), let closed = lid.lidClosed() {
                 print((L("  内屏: ") + "\(closed ? L("已合盖（已自动熄灭）") : L("开盖"))" + L("，SMC 合盖检测正常")))
@@ -2038,6 +1881,9 @@ case "nosleep":
         if !helperInstalled() { print(L("提权助手未安装")); exit(0) }
         // 先关掉正在运行的防睡眠，再卸载（顺序反了就再也无法复位）
         if let pid = nosleepPid() { kill(pid, SIGTERM); _ = waitUntil(timeout: 5.0) { nosleepPid() == nil } }
+        // 卸载后本程序再也不会被调用，遗留守护在这里收不掉就永远收不掉了 ——
+        // 它会一直持有 caffeinate，用户卸干净了却依然睡不了
+        _ = takeOverStaleDaemons()
         let (ok, out) = runAsAdmin(uninstallHelperScript())
         try? fm.removeItem(atPath: nosleepPidFile)
         try? fm.removeItem(atPath: nosleepStateFile)
@@ -2079,6 +1925,62 @@ case "nosleep":
         }
         print(nosleepHelp)
     }
+
+// 电源方案：接通电源 / 使用电池两套，各自设置三项（可同时开启）
+//
+//   lidkeep plan                                   查看两套方案与当前生效的是哪套
+//   lidkeep plan --ac --lid nothing                接通电源时合盖不睡眠
+//   lidkeep plan --battery --keep-awake off        用电池时关掉息屏保持唤醒
+//   lidkeep plan --keep-awake on --display-on on   不指定来源 = 两套一起改
+case "plan":
+    var c = loadConfig()
+    var wantAC = false, wantBatt = false
+    for a in args.dropFirst(2) {
+        if a == "--ac" { wantAC = true }
+        if a == "--battery" || a == "--batt" { wantBatt = true }
+    }
+    // 未指定来源时两套都改：与旧版「一份全局设置」的直觉保持一致
+    if !wantAC && !wantBatt { wantAC = true; wantBatt = true }
+    var changed = false
+    var i = 2
+    while i < args.count {
+        let a = args[i]
+        if a == "--keep-awake", i + 1 < args.count {
+            guard let v = onOff(args[i + 1]) else {
+                print((L("错误：--keep-awake 需要 on / off，收到: ") + "\(args[i + 1])")); exit(1)
+            }
+            if wantAC { c.planAC.keepAwake = v }
+            if wantBatt { c.planBattery.keepAwake = v }
+            changed = true; i += 2
+        }
+        else if a == "--display-on", i + 1 < args.count {
+            guard let v = onOff(args[i + 1]) else {
+                print((L("错误：--display-on 需要 on / off，收到: ") + "\(args[i + 1])")); exit(1)
+            }
+            if wantAC { c.planAC.displayOn = v }
+            if wantBatt { c.planBattery.displayOn = v }
+            changed = true; i += 2
+        }
+        else if a == "--lid", i + 1 < args.count {
+            guard let la = LidAction(rawValue: args[i + 1].lowercased()) else {
+                print((L("错误：--lid 需要 sleep（合盖睡眠）/ nothing（合盖不睡），收到: ") + "\(args[i + 1])")); exit(1)
+            }
+            if wantAC { c.planAC.lid = la }
+            if wantBatt { c.planBattery.lid = la }
+            changed = true; i += 2
+        }
+        else { i += 1 }
+    }
+    if changed {
+        // 三个生效布尔必须同步到当前电源来源那套，否则守护 / 一次性模式仍按旧值跑
+        let p = batteryStatus().onBattery ? c.planBattery : c.planAC
+        c.autoNosleep   = p.keepAwake
+        c.keepDisplayOn = p.displayOn
+        c.lidAwake      = (p.lid == .nothing)
+        saveConfig(c)
+        print((L("电源方案已保存: ") + "\(configFile)"))
+    }
+    printPlans(c)
 
 case "config":
     var c = loadConfig()
@@ -2130,7 +2032,8 @@ case "config":
             i += 2
         }
         else if args[i] == "--battery-action", i + 1 < args.count {
-            if let v = Int(args[i + 1]), (0...2).contains(v) {
+            // 取值合法性直接问枚举，而不是在这里再写一遍 0/1/2
+            if let v = Int(args[i + 1]), BatteryAction(rawValue: v) != nil {
                 c.batteryAction = v
             } else {
                 print((L("错误：--battery-action 需要 0 / 1 / 2（0=恢复屏幕，1=恢复并撤销防睡眠，2=只提醒），收到: ") + "\(args[i + 1])")); exit(1)
@@ -2145,7 +2048,10 @@ case "config":
             c.hotkeyEnabled = (v == "on" || v == "true")
             i += 2
         }
-        else if args[i] == "--auto-nosleep" { c.autoNosleep = true; i += 1 }
+        // 旧开关保留可用：等价于把「息屏后保持唤醒」写进两套方案（与旧版全局语义一致）
+        else if args[i] == "--auto-nosleep" {
+            c.planAC.keepAwake = true; c.planBattery.keepAwake = true; c.autoNosleep = true; i += 1
+        }
         else if args[i] == "--lang", i + 1 < args.count {
             let v = args[i + 1].lowercased()
             guard ["auto", "zh", "en"].contains(v) else {
@@ -2153,7 +2059,9 @@ case "config":
             }
             c.lang = v; i += 2
         }
-        else if args[i] == "--no-auto-nosleep" { c.autoNosleep = false; i += 1 }
+        else if args[i] == "--no-auto-nosleep" {
+            c.planAC.keepAwake = false; c.planBattery.keepAwake = false; c.autoNosleep = false; i += 1
+        }
         else if args[i] == "--reset" { c = Config(); i += 1 }
         else { i += 1 }
     }
@@ -2174,12 +2082,12 @@ case "config":
     print((L("  一次性模式超时: ") + "\(Int(c.timeout))" + L(" 秒（") + "\(String(format: "%.1f", c.timeout / 3600))" + L(" 小时，0 = 不限）")))
     print((L("  恢复亮度: ") + "\(c.restoreFixed.map { String(format: L("固定 %.0f%%"), $0 * 100) } ?? L("进入黑屏前的亮度"))"))
     print((L("  电量下限: ") + "\(c.batteryFloor > 0 ? ("\(c.batteryFloor)" + L("%（电池供电且放电时，低于此值拒绝关屏并自动恢复）")) : L("不限制"))"))
-    let actName = c.batteryAction == 1 ? L("恢复屏幕并撤销防睡眠（回到原本的电池行为）")
-                : c.batteryAction == 2 ? L("只提醒，不自动干预")
-                : L("恢复屏幕，继续防睡眠")
+    // 文案直接取枚举的 title：与设置面板永远一致，不在 CLI 里再抄一遍
+    let actName = (BatteryAction(rawValue: c.batteryAction) ?? .restoreOnly).title
     print((L("  电量触底动作: ") + "\(actName)"))
     print((L("  全局热键: ") + "\(c.hotkeyEnabled ? L("启用") : L("停用（只能从菜单栏点击）"))"))
     print((L("  关屏联动防睡眠: ") + "\(c.autoNosleep ? L("开（黑屏期间阻止系统睡眠，恢复显示时自动复位）") : L("关"))"))
+    printPlans(c)
     let langName = c.lang == "auto" ? L("跟随系统") : (c.lang == "zh" ? L("中文") : L("英文"))
     print((L("  界面语言: ") + "\(langName)" + L("（--lang auto/zh/en）")))
     print(L("  修改: lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep"))
@@ -2310,6 +2218,7 @@ default:
           lidkeep doctor                      Full self-check: blanking, display control, processes, leftovers
           lidkeep version                     Print the version
           lidkeep config --key 11             View or change the hotkey, timeout, battery floor and interface language
+          lidkeep plan --ac --lid nothing     View or change the power plans (on AC / on battery)
           lidkeep bright [0.0-1.0]            Read or write brightness directly
 
           Without the resident service: lidkeep off [--timeout SECONDS] [--no-timeout]
@@ -2349,6 +2258,7 @@ default:
           lidkeep doctor                     综合自检：关屏能力、显示器可控性、进程、残留
           lidkeep version                    查看版本
           lidkeep config --key 11            查看/修改热键、超时、电量下限、界面语言
+          lidkeep plan --ac --lid nothing    查看/修改电源方案（接通电源 / 使用电池，三项可同时开）
           lidkeep bright [0.0-1.0]           直接读写亮度
 
           不用常驻服务时: lidkeep off [--timeout 秒] [--no-timeout]

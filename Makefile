@@ -6,6 +6,7 @@
 #   make uninstall  卸载以上两者（含 launchd 登录项）
 #   make dev-tools  编译开发调试小工具到 build/dev-tools/
 #   make clean
+# 自检脚本：dev-tools/check-l10n.py（文案键覆盖）、dev-tools/smoke.sh（端到端冒烟）
 
 CC      = swiftc
 TARGETS = arm64-apple-macosx13.0 x86_64-apple-macosx13.0
@@ -62,7 +63,10 @@ icon:
 	@echo "==> 图标已更新: Sources/AppIcon.icns（执行 make app 后生效）"
 
 # 端到端冒烟测试：构建后跑真实关屏/恢复/防睡眠路径（会短暂黑屏约 4 秒）
+# 前置跑一次文案键自检：漏翻的键在中文环境下看不出问题，只有英文用户会看到中文，
+# 属于「作者测不出来」的一类 bug，必须机器兜住。
 test: cli
+	@python3 dev-tools/check-l10n.py .
 	@./dev-tools/smoke.sh
 
 # 通用规则：单文件 Swift 程序按架构分别编译后 lipo 合并
@@ -75,14 +79,19 @@ endef
 
 # 源码按 target 分目录：Swift 只有名为 main.swift 的文件允许顶层代码，
 # 因此 CLI 与菜单栏 App 各有自己的 main.swift，共享代码放 Sources/Shared/。
+#
+# 共享文件列表只写这一处：两个 target 必须编译同一份，漏掉一个就会退化成
+# 「另一端缺符号」或更糟的「两端各有一份实现互相漂移」。
+SHARED := Sources/Shared/Version.swift Sources/Shared/L10n.swift Sources/Shared/Config.swift \
+          Sources/Shared/PowerPlan.swift Sources/Shared/SystemState.swift Sources/Shared/Ownership.swift
 cli: version-file
-	$(call compile-universal,Sources/CLI/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift,lidkeep,build/lidkeep)
+	$(call compile-universal,Sources/CLI/main.swift $(SHARED),lidkeep,build/lidkeep)
 
 app: build/LidKeep.app
 
-build/LidKeep.app: Sources/Bar/main.swift Sources/Info.plist Sources/AppIcon.icns version-file
+build/LidKeep.app: Sources/Bar/main.swift Sources/Info.plist Sources/AppIcon.icns $(SHARED) version-file
 	@mkdir -p build/LidKeep.app/Contents/MacOS build/LidKeep.app/Contents/Resources
-	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/Bar/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift -o build/lk_$(t);)
+	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/Bar/main.swift $(SHARED) -o build/lk_$(t);)
 	lipo -create $(foreach t,$(TARGETS),build/lk_$(t)) -output build/LidKeep.app/Contents/MacOS/LidKeep
 	cp Sources/Info.plist build/LidKeep.app/Contents/Info.plist
 	cp Sources/AppIcon.icns build/LidKeep.app/Contents/Resources/AppIcon.icns

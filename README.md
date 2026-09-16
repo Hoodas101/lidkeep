@@ -17,27 +17,17 @@ $ lidkeep off      # screen goes black, system keeps running
 $ lidkeep on       # display restored (also works over SSH)
 ```
 
-## What's new in 2.2.1
+## The problem it solves
 
-- **Settings, rebuilt** — four tabs (General / Hotkey / Battery / Other), each scrollable, with card-style sections you can find at a glance.
-- **Record any hotkey** — click the recorder and press the combination you want. No modifier checkboxes, no preset key list, and the global hotkey can be switched off entirely.
-- **Battery floor, your way** — a 0–100% slider instead of six presets, plus a choice of what happens when it's hit: restore the display / restore **and** release anti-sleep so the Mac behaves the way it normally does on battery / just notify me.
+macOS wires "display off" and "system asleep" together. You only want the screen off; the system puts the whole machine to sleep.
 
-v2.2.0 added quiet background update checks — a `⬆` badge in the menu bar, never a dialog.
-
-## Sound familiar?
-
-| # | Situation | What usually happens |
-|---|---|---|
-| 1 | You want the screen dark to save power, but you're not at the machine | The moment it sleeps, remote desktop connects to a black frame |
-| 2 | You close the lid and toss the Mac in a bag | The machine sleeps with it — downloads, builds and remote sessions all drop |
-| 3 | You run closed-lid, or carry it closed | The moment sleep is prevented, the built-in panel stays lit — macOS never turns the backlight off just because you closed the lid |
-| 4 | You brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it is visible to passers-by |
-| 5 | You use macOS display sleep | The framebuffer is torn down, screen sharing captures nothing, remote access is effectively dead |
-
-**The core problem:** macOS wires "display off" and "system asleep" together. You only want the screen off; the system puts the whole machine to sleep.
-
-## Why not just use the built-in options
+| Your situation | What usually happens |
+|---|---|
+| You want the screen dark to save power, but you're not at the machine | The moment it sleeps, remote desktop connects to a black frame |
+| You close the lid and toss the Mac in a bag | The machine sleeps with it — downloads, builds and remote sessions all drop |
+| You run closed-lid, or carry it closed | The moment sleep is prevented, the built-in panel stays lit — macOS never turns the backlight off just because you closed the lid |
+| You brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it is visible to passers-by |
+| You use macOS display sleep | The framebuffer is torn down, screen sharing captures nothing, remote access is effectively dead |
 
 | Method | Screen off | Remote frames | Machine keeps working | Works closed-lid | Permissions |
 |---|:---:|:---:|:---:|:---:|---|
@@ -48,167 +38,61 @@ v2.2.0 added quiet background update checks — a `⬆` badge in the menu bar, n
 | Third-party keep-awake apps | ❌ stays lit | ✅ | ✅ | partial | some need grants |
 | **LidKeep** | ✅ | ✅ | ✅ | ✅ | **hotkey needs none** (lid mode needs a one-time helper) |
 
-One row makes all the difference: **LidKeep kills the backlight, not the display's power.**
-The display never sleeps, so the framebuffer keeps rendering and a remote viewer always sees the real picture instead of a black box.
+One row makes all the difference: **LidKeep kills the backlight, not the display's power.** The display never sleeps, so the framebuffer keeps rendering and a remote viewer always sees the real picture instead of a black box.
 
-## The fix: three switches, one job each
+## Blackout and power plans
+
+There are only two things in the menu:
 
 | Menu item | What it solves | How to use it |
 |---|---|---|
-| **Turn Display Off** | Screen goes black instantly, machine keeps running | Click it, or press ⌃⌥⌘B |
-| **Power mode ▸** | Everything else | Pick one of the four below; it persists across restarts |
+| **Turn Display Off** | The screen goes dark instantly — backlight cut, not merely dimmed — and the machine keeps running | Click it, or press ⌃⌥⌘B |
+| **Status: … ▸** | Everything else | The title *is* the current status (e.g. `Status: Power · Keep awake`); open it to set each power source separately — the three switches below can all be on at once |
 
-**Power mode** is exclusive — choosing one switches the others off, so you never have to work out which boxes can be ticked together. Each option states its own cost:
+**Power plan** follows the Windows "Power Options" model: plugged in and on battery are two different situations, so each keeps its own settings. Unplug the charger and the Mac moves to the battery plan within a few seconds — **Power / Battery** in the title tells you which one is active.
 
-| Mode | What happens | Cost |
+| Switch | What it does | Cost |
 |---|---|---|
-| **Off** | Display and Mac both sleep normally | none |
-| **Stay awake, display may sleep** | Display sleeps as usual, the Mac keeps running | easy on battery |
-| **Keep display on** | Display never sleeps on its own | uses more power |
-| **Run with lid closed** | Keeps running with the lid shut, built-in panel off, for hours | needs the privileged helper; plug in if you can |
+| **Stay awake after the display sleeps** | The Mac keeps running while the display is dark — whether you blanked it from LidKeep or simply let macOS blank it | easy on battery |
+| **Keep the display on** | Display never sleeps on its own | uses more power |
+| **When the lid closes** | `Sleep` (system default) or `Keep awake` (keeps running, built-in panel off) | "Keep awake" needs the privileged helper; plug in if you can |
 
-The lid mode runs on its own daemon, so it survives an app restart; the two display modes are held by the app itself.
+Three things to know:
 
-## Up and running in 30 seconds
+- They are **not** mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both.
+- **Stay awake after the display sleeps** grabs its own anti-sleep assertion the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own.
+- If a plan cannot take effect right now (helper missing, battery below the floor), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten.
 
-One line, if you'd rather not think about it:
+## Three ways people actually use it
+
+- **The Mac as a remote host** (UURemote / ToDesk / VNC / SSH) — `lidkeep off` blanks the screen, the machine stays awake, remote frames stay clean. Press the hotkey when you're back at the desk. Worried you'll forget? A 12-hour fallback timeout restores the display automatically.
+- **Closed in a bag, still working** — open **When the lid closes** in the menu and pick **Keep awake**; the built-in panel turns itself off, downloads / builds / remote sessions keep going, and brightness comes back when you open the lid.
+- **Stepping away from the desk** — hit the hotkey; the screen goes dark and your tasks keep running. ⚠️ Blanking is **not** locking — press ⌃⌘Q before you leave.
+
+## Install
+
+**One line** (looks up the latest release → downloads and verifies `SHA256SUMS` → installs the app and CLI → clears quarantine → launches; falls back to a mirror if GitHub is slow):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Mihooni/lidkeep/main/install-remote.sh | bash
 ```
 
-It looks up the latest release, downloads (falling back to a mirror if GitHub is
-slow), checks the SHA256 against the published `SHA256SUMS`, installs to
-`/Applications`, clears the quarantine flag, drops in the CLI and launches the app.
 Want to read it before running it? Drop the `| bash` and open the file.
 
-Or, with Homebrew:
+**Or pick any of these:**
 
-```bash
-brew install --cask mihooni/tap/lidkeep
-xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # one-time, while unsigned
-```
-
-Or, by hand:
-
-1. Download `LidKeep-<version>.dmg` from [Releases](../../releases/latest)
-2. Open it and drag the app into Applications
-3. Click the ☀ icon in the menu bar → **Turn Display Off**
-
-The screen goes black. Press ⌃⌥⌘B (or click the icon again) to bring it back.
-For closed-lid use, tick **Stay Awake with Lid Closed (long-running)** — one admin-password prompt installs a privileged helper, and it keeps working from then on.
-
-## Three ways people actually use it
-
-**A. The Mac as a remote host** (UURemote / ToDesk / VNC / SSH)
-`lidkeep off` → screen dark, machine awake, remote picture fine. Press the hotkey when you're back at the desk.
-Worried you'll forget? A 12-hour fallback timeout restores the display automatically.
-
-**B. Closed in a bag, still working**
-Tick "Stay Awake with Lid Closed" → close the lid → **the built-in panel turns itself off** (since v1.5.2, via the SMC lid switch). Downloads, builds and remote sessions keep going; open the lid and brightness is restored.
-If the battery drops below the floor while discharging, it stops and notifies you instead of draining to zero.
-
-**C. Stepping away from the desk**
-Hit the hotkey; the screen goes dark and your tasks keep running.
-⚠️ Blanking is **not** locking — anyone who sits down can still type. Press ⌃⌘Q before you leave.
-
-## How it works
-
-Instead of letting macOS put the display to sleep (which kills the framebuffer and breaks screen capture), LidKeep sets the **system brightness to 0** and holds a `caffeinate -di` assertion so the display pipeline stays fully powered. Verified behavior:
-
-| Probe | Normal | Blacked out |
+| Option | How | Notes |
 |---|---|---|
-| Screenshot content | rendered | fully rendered (not painted black) |
-| `CGDisplayIsAsleep()` | 0 | **0** — display never sleeps |
-| Display power state | 4 (max) | **4** (max) |
+| Homebrew | `brew install --cask mihooni/tap/lidkeep` | still run the one-line quarantine fix below |
+| Installer | download `LidKeep-<version>.pkg` from [Releases](../../releases/latest) and double-click | installs app + CLI in one step; if blocked, right-click → **Open** |
+| DMG | download the `.dmg`, open it, drag the app into Applications | `Install Command-Line Tool.command` inside the image also installs the CLI |
+| Source | `git clone … && cd lidkeep && ./install.sh` | needs Xcode Command Line Tools; `--cli-only` skips the app |
 
-The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but makes remote frames unavailable. LidKeep keeps the machine fully remote-controllable.
+Then click ☀ in the menu bar → **Turn Display Off**. The screen goes black; press ⌃⌥⌘B to bring it back.
 
-## Details worth knowing
+### Unsigned: clear the quarantine flag once
 
-- **Zero permission grants.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries lose TCC grants on each recompile, the most common trap for small tools like this).
-- **Crash-safe.** If the app is killed while the screen is black, the next launch restores your previous brightness automatically. A configurable fallback timeout (default 12 h) is the last safety net.
-- **Battery guard.** Only on battery and discharging: below the floor (default 20%) a blackout is refused, and during a blackout the level is re-checked every 30 s — cross the floor and the display comes back with a notification. No effect on AC power.
-- **CLI and app share state.** `lidkeep on` over SSH can restore a screen the menu bar app turned off, and vice versa.
-- **Single instance.** Launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
-- **Update & about from the menu.** "View on GitHub" opens the repo in one click; "About LidKeep" shows the version, commit and license; "Check for Updates…" queries the GitHub Releases API and links to the download page when a newer version exists (with a manual fallback if the network is unavailable).
-- **Automatic update checks** (on by default, switchable in Settings). The app quietly reads the latest version number once every 24 hours and only records the timestamp on success — a failed check is retried on the next heartbeat instead of leaving you unchecked for a whole day. A newer release raises a `⬆` badge in the menu bar and puts an "open the release page" entry at the top of the menu; nothing interrupts you, and the reminder stays until you actually install the new version. The request only reads a public version number and uploads nothing about your Mac.
-
-## Language
-
-**Follows your system**: Chinese system language → Chinese UI; anything else (including English) → English UI. The menu bar app and the CLI agree, with nothing to configure.
-
-To switch it temporarily or permanently:
-
-| Method | Usage |
-|---|---|
-| Environment variable | `LIDKEEP_LANG=zh lidkeep doctor` (`zh` / `en`) |
-| Config file | set `"lang": "zh"` in `~/Library/Application Support/LidKeep/config.json` |
-
-The config accepts `auto` (follow the system, default) / `zh` / `en`; the environment variable wins over it.
-
-## Requirements
-
-- macOS 13 Ventura or later (built as a universal binary: Apple Silicon + Intel)
-- Built-in display (brightness control via DisplayServices; external monitors without DDC support are not affected)
-
-## Install
-
-**Option A — Homebrew.** One command, and the easiest way to stay up to date:
-
-```bash
-brew install --cask mihooni/tap/lidkeep
-xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # needed today, see below
-```
-
-The tap lives at [Mihooni/homebrew-tap](https://github.com/Mihooni/homebrew-tap).
-The second line is not optional — see
-[Gatekeeper and unsigned builds](#gatekeeper-and-unsigned-builds).
-
-**Option B — installer.** Download `LidKeep-<version>.pkg` from
-[Releases](../../releases/latest) and double-click it. One step, both pieces installed:
-
-| Installed to | Item |
-|---|---|
-| `/Applications/LidKeep.app` | menu bar app |
-| `/usr/local/bin/lidkeep` | CLI |
-
-The installer clears the **app's** quarantine flag and launches it for you. Be aware of
-a second, earlier gate: the `.pkg` itself is not signed with a paid certificate, so if
-macOS refuses to open it ("unidentified developer"), right-click the `.pkg` → **Open**
-and confirm once. That is the only manual step, and only on the first install.
-
-**Option C — DMG drag-and-drop.** Download `LidKeep-<version>.dmg` from
-[Releases](../../releases/latest), open it, and drag the app into Applications.
-Double-click `Install Command-Line Tool.command` inside the image to also install the CLI
-(one GUI password prompt). If Gatekeeper blocks the first launch, right-click
-the app → **Open**.
-
-**Option D — build from source** (needs Xcode Command Line Tools):
-
-```bash
-git clone https://github.com/Mihooni/lidkeep.git
-cd lidkeep
-./install.sh              # installs CLI to your Homebrew prefix (/opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel) + app to /Applications
-```
-
-`./install.sh --cli-only` skips the menu bar app. `make pkg` builds the same installer locally.
-
-**Option E — download a prebuilt zip** from [Releases](../../releases/latest), then:
-
-```bash
-xattr -dr com.apple.quarantine LidKeep.app   # unsigned build: clear Gatekeeper flag
-cp -R LidKeep.app /Applications/
-# Apple Silicon: sudo cp lidkeep /opt/homebrew/bin/   |   Intel: sudo cp lidkeep /usr/local/bin/
-```
-
-### Gatekeeper and unsigned builds
-
-This is the one rough edge, and it is worth understanding before you install.
-
-Releases are signed **ad-hoc, not notarized** (there is no paid Apple Developer
-certificate behind this project), so Gatekeeper treats a downloaded copy as untrusted.
-Measured on macOS 26:
+Releases are signed **ad-hoc, not notarized** (there is no paid Apple Developer certificate behind this project), so Gatekeeper treats a downloaded copy as untrusted. Measured on macOS 26:
 
 | Path | What Gatekeeper does |
 |---|---|
@@ -216,71 +100,51 @@ Measured on macOS 26:
 | `brew install --cask` | Homebrew applies the quarantine attribute itself — the app is **also rejected** |
 | Opening a quarantined copy | macOS refuses, and **may move the app straight to the Trash** |
 
-Homebrew cannot help here: `--no-quarantine` no longer exists in Homebrew 6, and a cask
-cannot waive quarantine on the user's behalf. Every path above therefore needs one manual
-step, once:
+Homebrew cannot help here (`--no-quarantine` no longer exists in Homebrew 6), so every path needs **one manual step, once**:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/LidKeep.app
 ```
 
-After a manual `.dmg`/`.pkg` download you can instead right-click it → **Open** and
-confirm once.
+(After a manual `.dmg`/`.pkg` download you can instead right-click it → **Open** and confirm once.)
 
-**The real fix is notarization** — Developer ID signing plus a notarization ticket. Once
-that lands, every path above becomes a plain double-click, and it is the top priority for
-the next release. In the meantime each release publishes `SHA256SUMS` and GitHub
-build-provenance attestations, so you can verify that what you downloaded came from this
-repository.
+**The real fix is notarization** — Developer ID signing plus a notarization ticket. Once that lands, every path above becomes a plain double-click, and it is the top priority for the next release. In the meantime each release publishes `SHA256SUMS` and GitHub build-provenance attestations, so you can verify that what you downloaded came from this repository:
+
+```bash
+shasum -a 256 -c SHA256SUMS                                  # bytes match what was published
+gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # built by this repo's release workflow
+```
 
 ### Downloading from mainland China
 
-`github.com` release assets are often unreachable from mainland China — measured at
-**0 bytes in 10 seconds**, while `api.github.com` and `raw.githubusercontent.com` stay
-fine. That is a CDN-level block, not a problem with this project.
+`github.com` release assets are often unreachable from mainland China — measured at **0 bytes in 10 seconds**, while `api.github.com` and `raw.githubusercontent.com` stay fine. That is a CDN-level block, not a problem with this project.
 
-Prefix a release URL with `https://gh-proxy.com/` to route the download through a
-mirror. This was verified byte-identical to the official artifact (matching SHA-256,
-full length) at roughly **173 KB/s**:
+Prefix a release URL with `https://gh-proxy.com/` to route the download through a mirror. This was verified byte-identical to the official artifact (matching SHA-256, full length) at roughly **173 KB/s**:
 
 ```bash
-V=2.2.1
+V=2.2.2
 curl -L -O "https://gh-proxy.com/https://github.com/Mihooni/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # must match SHA256SUMS from the release
 ```
 
-`gh-proxy.com` is a third-party accelerator, not something this project controls — it can
-change or disappear. Always check the hash against `SHA256SUMS` before installing, and
-prefer the official URL whenever you can reach it.
+`gh-proxy.com` is a third-party accelerator, not something this project controls — it can change or disappear. Always check the hash against `SHA256SUMS` before installing, and prefer the official URL whenever you can reach it.
 
 ### Upgrading from an older release
 
-The product has been called **LidKeep** since v2.0.0, when the CLI name, the app name and every
-bundle identifier changed. State left behind by v1.x — its config folder, login item, privileged
-helper and anti-sleep ledger — is **not** migrated or cleaned up automatically any more: back up
-`~/Library/Application Support/` and remove the old app yourself before upgrading.
-
-### Verify a download (optional)
-
-Each release ships a `SHA256SUMS` checksum file plus GitHub build-provenance
-attestations (SLSA), so you can confirm the artifacts came from this repo's
-workflow — no Apple account needed:
-
-```bash
-shasum -a 256 -c SHA256SUMS                                          # bytes match what was published
-gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # built by this repo's release workflow
-```
+The product has been called **LidKeep** since v2.0.0, when the CLI name, the app name and every bundle identifier changed. State left behind by v1.x — its config folder, login item, privileged helper and anti-sleep ledger — is **not** migrated or cleaned up automatically any more: back up `~/Library/Application Support/` and remove the old app yourself before upgrading.
 
 ## Usage
 
-**Menu bar app** — click ☀ / 🌙 in the menu bar; the three core functions are named in plain words:
+**Menu bar app** — click ☀ / 🌙 in the menu bar:
 
 - **Turn Display Off** — black out now, machine keeps running (click again or press the hotkey to restore)
-- **Power mode ▸** — four exclusive choices: Off / Stay awake, display may sleep / Keep display on / Run with lid closed
-- **Install Privileged Helper…** (first run) — extends lid-closed mode to battery and closed lid (one password prompt)
-- **Settings…** — four tabs: General (power mode, restore brightness), Hotkey (record any combination, enable/disable the global hotkey, fallback timeout), Battery (custom floor + what happens when it is hit: restore the display / restore **and** release anti-sleep so the Mac behaves like normal on battery / notify only), Other (launch at login, update checks, safety note)
+- **Status: … ▸** — see [Blackout and power plans](#blackout-and-power-plans) above; the title *is* the current status (e.g. `Status: Power · Keep awake`), and it edits whichever plan is active right now
+- **Install Privileged Helper (first run)…** — lets "When the lid closes ▸ Keep awake" cover battery and lid (one password prompt)
+- **Settings…** — four tabs: General / Hotkey / Battery / Other
 - **Hotkey Self-test** — synthesizes your hotkey once and verifies the delivery path (no side effects)
 - **Open Log**
+
+The four settings tabs cover: **General** (both power plans side by side, restore brightness, blank the display when the lid closes), **Hotkey** (record any combination, enable/disable the global hotkey, fallback timeout), **Battery** (custom floor + what happens when it is hit), and **Other** (launch at login, automatic update checks, safety note).
 
 **CLI**:
 
@@ -297,13 +161,17 @@ lidkeep service install        # run the CLI as a launchd service (menu app not 
 lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200
 lidkeep config --battery 20    # battery floor %: refuse/exit blackout below it (0 = off)
 lidkeep config --auto-nosleep  # link anti-sleep to blackout; auto-reset on restore
+lidkeep plan                    # show both power plans and which one is active right now
+lidkeep plan --ac --lid nothing                  # lid-closed running while plugged in
+lidkeep plan --battery --keep-awake off --display-on on
+lidkeep plan --keep-awake on    # no --ac/--battery = change both plans at once
 ```
 
-Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `lidkeep config`. The combo must include at least one modifier (⌘/⌃/⌥/⇧) — macOS rejects global hotkeys without one.
+`lidkeep plan` edits the same plans the menu bar uses (`--lid sleep|nothing`, `--keep-awake on|off`, `--display-on on|off`). The settings panel is the friendlier way in; this exists so scripts and remote shells can do it too.
 
-**Multiple displays:** blackout applies to every online display. However, most HDMI/DVI/DP
-external monitors don't support software brightness, so those panels can't be dimmed —
-`lidkeep doctor` tells you exactly which one, instead of leaving you guessing.
+Default hotkey: **⌃⌥⌘B**. The combo must include at least one modifier (⌘/⌃/⌥/⇧) — macOS rejects global hotkeys without one.
+
+**Multiple displays:** blackout applies to every online display. However, most HDMI/DVI/DP external monitors don't support software brightness, so those panels can't be dimmed — `lidkeep doctor` names the exact display instead of leaving you guessing.
 
 ## Anti-sleep (closed lid / battery / headless)
 
@@ -318,24 +186,12 @@ lidkeep nosleep status                 # level / power source / uptime
 lidkeep nosleep off                    # stop and reset
 ```
 
-### Lid-closed anti-sleep (long-running mode)
-
-In the menu bar app, click **"Stay Awake with Lid Closed (long-running)"** to enable with one click — no terminal needed:
+**Lid-closed anti-sleep**: open **When the lid closes** in the menu bar and pick **Keep awake** — no terminal needed.
 
 - **Closed lid = display off, machine keeps running**: downloads, remote access, external displays and long tasks all keep working
-- **Automatic lid blackout (since v1.5.2)**: the daemon polls the SMC lid switch (MSLD key); on lid close it zeroes the built-in display brightness and restores it when the lid opens — the built-in panel only, external displays are never touched; when the daemon stops (battery floor / timeout / manual off) the brightness is restored too, never leaving a black screen behind
+- **Automatic lid blackout** (since v1.5.2): the daemon polls the SMC lid switch (MSLD key); on lid close it zeroes the built-in display brightness and restores it when the lid opens — the built-in panel only, external displays are never touched; when the daemon stops (battery floor / timeout / manual off) the brightness is restored too, never leaving a black screen behind. Turn it off separately with **Blank the built-in display when the lid closes** on the General tab
 - **Persistent**: the flag is saved in config; the daemon is restored automatically after app or system restarts
-- **Safety net**: auto-stops with a notification when the battery (discharging) drops below the floor (default 20%); turning it off resets `disablesleep`
 - **Independent of blackout linkage**: the lid daemon and blackout-linked anti-sleep are separate entries in the owner ledger, so toggling one never disturbs the other
-- Requires the privileged helper; if missing, the menu walks you through the graphical one-click install (one admin-password prompt)
-
-You can also tick "Stay awake with lid closed (long-running mode)" in the settings panel, or use the CLI:
-
-```bash
-lidkeep nosleep on --system            # enable directly (helper required)
-lidkeep nosleep status                 # shows the lid-mode state
-lidkeep nosleep off                    # stop and reset
-```
 
 **Why does the system level need a privileged helper?** Per `man caffeinate`, the `-s` assertion is effective **on AC power only**. Covering battery and closed-lid requires `pmset disablesleep`, which must run as root. Install the helper once (asks for your admin password):
 
@@ -351,19 +207,43 @@ Safety design:
 - sudoers grants a single user, running as root, exactly those four arguments
 - Uninstall resets `disablesleep 0` *before* deleting the helper — no "system never sleeps again" leftovers
 - A boot-time LaunchDaemon plus a self-heal check on every start reset any state left by a crashed process
-- **Owner accounting:** `disablesleep` is a single global switch that "blackout-linked anti-sleep"
-  and "manual anti-sleep" may both depend on. The helper records each owner, so when one stops it
-  only unregisters itself — it never disables the anti-sleep the other one still relies on.
-  (Ledger lives in `/var/db/lidkeep-nosleep`, owned by root; unprivileged users can't forge owners.)
-- **Coexists with remote-control apps:** ToDesk / Sunlogin / UURemote / TeamViewer and friends hold the same switch to stay reachable. When one is running, `doctor` reports "held by a remote-control app" instead of flagging it as a leftover to fix.
+- **Owner accounting:** `disablesleep` is a single global switch that "blackout-linked anti-sleep" and "manual anti-sleep" may both depend on. The helper records each owner, so when one stops it only unregisters itself — it never disables the anti-sleep the other one still relies on. (Ledger lives in `/var/db/lidkeep-nosleep`, owned by root; unprivileged users can't forge owners.)
+- **Coexists with remote-control apps:** ToDesk / Sunlogin / UURemote / TeamViewer and friends hold the same switch to stay reachable. When one is running, `doctor` reports "held by a remote-control app" instead of flagging it as a leftover to fix
 - The battery floor applies to anti-sleep too — closed lid + battery + no sleep is the fastest way to drain a battery
 
-## Uninstall
+## How it works
 
-```bash
-./uninstall.sh           # or: make uninstall
-# config/logs (optional): rm -rf ~/Library/Application\ Support/LidKeep
-```
+Instead of letting macOS put the display to sleep (which kills the framebuffer and breaks screen capture), LidKeep sets the **system brightness to 0** and holds a `caffeinate -di` assertion so the display pipeline stays fully powered. Verified behavior:
+
+| Probe | Normal | Blacked out |
+|---|---|---|
+| Screenshot content | rendered | fully rendered (not painted black) |
+| Built-in brightness | e.g. 0.41 | **0.0** — backlight fully off, the panel emits no light |
+| `CGDisplayIsAsleep()` | 0 | **0** — display never sleeps |
+| Display power state | 4 (max) | **4** (max) |
+
+The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more (backlight off alone saves roughly 1–2 W, up to ~15–30% of a lightly loaded machine), but it makes remote frames unavailable. LidKeep keeps the machine fully remote-controllable.
+
+## Language
+
+**Follows your system**: Chinese system language → Chinese UI; anything else (including English) → English UI. The menu bar app and the CLI agree, with nothing to configure.
+
+To switch it temporarily or permanently: `LIDKEEP_LANG=zh lidkeep doctor` (`zh` / `en`), or set `"lang": "zh"` in `~/Library/Application Support/LidKeep/config.json`. The config accepts `auto` (default) / `zh` / `en`, and the environment variable wins over it.
+
+## Details worth knowing
+
+- **Zero permission grants.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries lose TCC grants on each recompile, the most common trap for small tools like this).
+- **Crash-safe.** If the app is killed while the screen is black, the next launch restores your previous brightness automatically. A configurable fallback timeout (default 12 h) is the last safety net.
+- **Battery guard.** Only on battery and discharging: below the floor (default 20%) a blackout is refused, and during a blackout the level is re-checked every 30 s — cross the floor and the display comes back with a notification. No effect on AC power. Disable with `lidkeep config --battery 0` or in the settings panel.
+- **CLI and app share state.** `lidkeep on` over SSH can restore a screen the menu bar app turned off, and vice versa.
+- **Single instance.** Launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
+- **Update & about from the menu.** "View on GitHub" opens the repo in one click; "About LidKeep" shows the version, commit and license; "Check for Updates…" queries the GitHub Releases API and links to the download page when a newer version exists.
+- **Automatic update checks** (on by default, switchable in Settings). The app quietly reads the latest version number once every 24 hours and only records the timestamp on **success** — a failed check is retried on the next heartbeat instead of leaving you unchecked for a whole day. A newer release raises a `⬆` badge in the menu bar and puts an "open the release page" entry at the top of the menu; nothing interrupts you, and the reminder stays until you actually install the new version. The request only reads a public version number and uploads nothing about your Mac.
+
+## Requirements
+
+- macOS 13 Ventura or later (built as a universal binary: Apple Silicon + Intel)
+- Built-in display (brightness control via DisplayServices; external monitors without DDC support are not affected)
 
 ## FAQ
 
@@ -373,15 +253,18 @@ Safety design:
 
 **Why not just `pmset displaysleepnow`?** True display sleep tears down the framebuffer — remote viewers get nothing. Many apps (browsers, Electron apps) also hold `NoDisplaySleepAssertion`, which blocks display sleep entirely. Brightness-zeroing works everywhere and is the only method that keeps remote frames flowing.
 
-**Power savings?** Backlight off saves roughly 1–2 W (up to ~15–30% of a lightly loaded machine). The GPU/compositor keep running by design.
+## Uninstall
 
-**How does the battery guard work?** It only acts when the Mac is on battery and discharging: below the floor (default 20%), starting a blackout is refused; during a blackout the battery is re-checked every 30 s and the display is restored automatically with a notification once the floor is crossed. On AC power it never interferes. Set `lidkeep config --battery 0` (or the settings panel) to disable.
+```bash
+./uninstall.sh           # or: make uninstall
+# config/logs (optional): rm -rf ~/Library/Application\ Support/LidKeep
+```
 
 ## Development
 
 ```bash
 make            # build CLI + app into build/
-make test       # end-to-end smoke test (arg validation, config round-trip, anti-sleep, asset parity)
+make test       # end-to-end smoke test (arg validation, config round-trip, anti-sleep, asset parity, l10n parity)
 make dev-tools  # build debugging helpers into build/dev-tools/
 make clean
 ```
@@ -390,25 +273,18 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 
 - `Sources/CLI/main.swift` — command-line tool
 - `Sources/Bar/main.swift` — menu bar app
-- `Sources/Shared/Version.swift` — generated at build time
-- `dev-tools/` — helpers plus `smoke.sh`
+- `Sources/Shared/` — the **single implementation** both targets compile (config model, system state and brightness, power plans, process ownership, localization, version)
+- `dev-tools/` — helpers plus `smoke.sh` and the `check-l10n.py` copy guard
 
-`make test` skips cases the current environment can't run (e.g. it won't do a real blackout while
-the menu bar app is live, since that would interrupt your session). Set `SMOKE_FULL=1` to force it.
+`make test` skips cases the current environment can't run (e.g. it won't do a real blackout while the menu bar app is live, since that would interrupt your session). Set `SMOKE_FULL=1` to force it.
 
 ## Known limitations
 
-- **Some external displays can't be turned off.** Dimming relies on the software brightness API,
-  which most HDMI/DVI/DP monitors don't support, so those panels stay lit during a blackout.
-  `lidkeep doctor` names the exact display. Powering them down would require true display
-  sleep, which breaks remote frames — this tool deliberately doesn't do that.
+- **Some external displays can't be turned off.** Dimming relies on the software brightness API, which most HDMI/DVI/DP monitors don't support, so those panels stay lit during a blackout. `lidkeep doctor` names the exact display. Powering them down would require true display sleep, which breaks remote frames — this tool deliberately doesn't do that.
 
-- The panel is **not powered down** — this is intentional. Backlight is driven to 0, so
-  the framebuffer keeps rendering and screen-sharing / remote-desktop sessions keep
-  working. True display sleep would break remote access; see [How it works](#how-it-works).
+- The panel is **not powered down** — this is intentional. Backlight is driven to 0, so the framebuffer keeps rendering and screen-sharing / remote-desktop sessions keep working. True display sleep would break remote access; see [How it works](#how-it-works).
 
-- **Blackout is not a lock screen.** While blacked out, anyone with physical access to the
-  keyboard can still operate the machine — they just can't see it. Lock manually (⌃⌘Q).
+- **Blackout is not a lock screen.** While blacked out, anyone with physical access to the keyboard can still operate the machine — they just can't see it. Lock manually (⌃⌘Q).
 
 ## Support this project
 
@@ -419,9 +295,8 @@ If this project saves you time, buying me a coffee keeps it going ☕
   <img src="docs/donate-alipay.jpg" alt="Alipay" width="220">
 </p>
 
-**Elsewhere in the world?** These QR codes need a WeChat or Alipay account with a mainland
-bank card, so they won't work for everyone. An international option (card / PayPal) is on the
-way — until then, a ⭐ star or a bug report helps this project more than you might think.
+**Elsewhere in the world?** These QR codes need a WeChat or Alipay account with a mainland bank card, so they won't work for everyone. An international option (card / PayPal) is on the way — until then, a ⭐ star or a bug report helps this project more than you might think.
+
 ## License
 
 [MIT](LICENSE)
