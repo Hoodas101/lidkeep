@@ -26,7 +26,7 @@ macOS wires "display off" and "system asleep" together. You only want the screen
 | You want the screen dark to save power, but you're not at the machine | The moment it sleeps, remote desktop connects to a black frame |
 | You close the lid and toss the Mac in a bag | The machine sleeps with it — downloads, builds and remote sessions all drop |
 | You run closed-lid, or carry it closed | The moment sleep is prevented, the built-in panel stays lit — macOS never turns the backlight off just because you closed the lid |
-| You brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it visible to passers-by |
+| You brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it visible to anyone nearby |
 | You use macOS display sleep | The framebuffer is torn down, screen sharing captures nothing, remote access is effectively dead |
 
 ## How it compares
@@ -40,7 +40,7 @@ macOS wires "display off" and "system asleep" together. You only want the screen
 | Third-party keep-awake apps | ❌ stays lit | ✅ | ✅ | partial | some need grants |
 | **LidKeep** | ✅ | ✅ | ✅ | ✅ | **hotkey needs none** (lid mode needs a one-time helper) |
 
-The difference is one thing: **LidKeep kills the backlight, not the display's power.** The display never sleeps, so the framebuffer keeps rendering and a remote viewer always sees the real picture instead of a black box.
+The difference comes down to one thing: **LidKeep only cuts the backlight; it never puts the display to sleep.** The display stays awake, the framebuffer keeps rendering, and a remote viewer always sees the real picture instead of a black screen.
 
 ## There are only two menu items
 
@@ -57,7 +57,7 @@ The difference is one thing: **LidKeep kills the backlight, not the display's po
 | **Keep the display on** | Display never sleeps on its own | uses more power |
 | **When the lid closes** | `Sleep` (system default) or `Keep awake` (keeps running, built-in panel off) | "Keep awake" needs the privileged helper; plug in if you can |
 
-They are not mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both. **Stay awake after the display sleeps** grabs its own anti-sleep assertion the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own. If a plan cannot take effect right now (helper missing, battery below the floor), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten.
+They are not mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both. **Stay awake after the display sleeps** holds its own anti-sleep assertion from the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own. If a plan cannot take effect right now (helper missing, battery below the floor), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten.
 
 ## Three ways people actually use it
 
@@ -127,7 +127,7 @@ shasum -a 256 "LidKeep-$V.dmg"   # must match SHA256SUMS from the release
 
 ### Upgrading from an older release
 
-The product has been called **LidKeep** since v2.0.0, when the CLI name, the app name and every bundle identifier changed. State left behind by v1.x — its config folder, login item, privileged helper and anti-sleep ledger — is **not** migrated or cleaned up automatically any more: back up `~/Library/Application Support/` and remove the old app yourself before upgrading.
+The product has been called **LidKeep** since v2.0.0, when the CLI name, the app name and every bundle identifier changed. State left behind by v1.x — its config folder, login item, privileged helper and anti-sleep ledger — is **not** migrated or cleaned up automatically anymore: back up `~/Library/Application Support/` and remove the old app yourself before upgrading.
 
 ## Usage
 
@@ -171,7 +171,7 @@ Default hotkey: **⌃⌥⌘B**. The combo must include at least one modifier (�
 
 ## Anti-sleep (closed lid / battery / headless)
 
-Blackout only kills the backlight — the system itself still sleeps on schedule. If the machine must keep working while blacked out (remote access, downloads, closed-clamshell use), enable anti-sleep:
+Blackout only turns the backlight off — the system itself still sleeps on schedule. If the machine must keep working while blacked out (remote access, downloads, closed-clamshell use), enable anti-sleep:
 
 ```bash
 lidkeep nosleep setup                  # one command: install helper + blackout linkage + start anti-sleep
@@ -199,7 +199,7 @@ Safety design:
 - Uninstall resets `disablesleep 0` *before* deleting the helper — no "system never sleeps again" leftovers
 - A boot-time LaunchDaemon plus a self-heal check on every start reset any state left by a crashed process
 - **Owner accounting:** `disablesleep` is a single global switch that "blackout-linked anti-sleep" and "manual anti-sleep" may both depend on. The helper records each owner, so when one stops it only unregisters itself — it never disables the anti-sleep the other one still relies on. (Ledger lives in `/var/db/lidkeep-nosleep`, owned by root; unprivileged users can't forge owners.)
-- **Coexists with remote-control apps:** ToDesk / Sunlogin / UURemote / TeamViewer and friends hold the same switch to stay reachable. When one is running, `doctor` reports "held by a remote-control app" instead of flagging it as a leftover to fix
+- **Coexists with remote-control apps:** ToDesk / Sunlogin / UURemote / TeamViewer and friends use the same switch to stay reachable. When one is running, `doctor` reports "held by a remote-control app" instead of flagging it as a leftover to fix
 - The battery floor applies to anti-sleep too — closed lid + battery + no sleep is the fastest way to drain a battery
 
 ## How it works
@@ -217,19 +217,19 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more (backlig
 
 ## Language
 
-**Follows your system**: Chinese system language → Chinese UI; anything else (including English) → English UI. The menu bar app and the CLI agree, with nothing to configure.
+**Follows your system**: Chinese system language → Chinese UI; anything else (including English) → English UI. The menu bar app and the CLI always match — nothing to configure.
 
 To switch it temporarily or permanently: `LIDKEEP_LANG=zh lidkeep doctor` (`zh` / `en`), or set `"lang": "zh"` in `~/Library/Application Support/LidKeep/config.json`. The config accepts `auto` (default) / `zh` / `en`, and the environment variable wins over it.
 
 ## Details worth knowing
 
-- **Zero permission grants.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries lose TCC grants on each recompile, the most common trap for small tools like this).
+- **No permissions needed.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries lose TCC grants on each recompile, the most common trap for small tools like this).
 - **Crash-safe.** If the app is killed while the screen is black, the next launch restores your previous brightness automatically. A configurable fallback timeout (default 12 h) is the last safety net.
 - **Battery guard.** Only on battery and discharging: below the floor (default 20%) a blackout is refused, and during a blackout the level is re-checked every 30 s — cross the floor and the display comes back with a notification. No effect on AC power. Disable with `lidkeep config --battery 0` or in the settings panel.
 - **CLI and app share state.** `lidkeep on` over SSH can restore a screen the menu bar app turned off, and vice versa.
 - **Single instance.** Launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
 - **Update & about from the menu.** "View on GitHub" opens the repo in one click; "About LidKeep" shows the version, commit and license; "Check for Updates…" queries the GitHub Releases API and links to the download page when a newer version exists.
-- **Automatic update checks** (on by default, switchable in Settings). The app quietly reads the latest version number once every 24 hours and only records the timestamp on **success** — a failed check is retried on the next heartbeat instead of leaving you unchecked for a whole day. A newer release raises a `⬆` badge in the menu bar and puts an "open the release page" entry at the top of the menu; nothing interrupts you, and the reminder stays until you actually install the new version. The request only reads a public version number and uploads nothing about your Mac.
+- **Automatic update checks** (on by default, switchable in Settings). The app quietly reads the latest version number once every 24 hours and only records the timestamp on **success** — a failed check is retried on the next heartbeat instead of leaving you unchecked for a whole day. A newer release shows a `⬆` badge in the menu bar and puts an "open the release page" entry at the top of the menu; nothing interrupts you, and the reminder stays until you actually install the new version. The request only reads a public version number and uploads nothing about your Mac.
 
 ## Requirements
 
@@ -238,7 +238,7 @@ To switch it temporarily or permanently: `LIDKEEP_LANG=zh lidkeep doctor` (`zh` 
 
 ## FAQ
 
-**Hotkey doesn't trigger.** Check the ⚠ badge next to the menu bar icon. Three usual causes: the combo is taken by another app (pick another), the combo has no modifier, or the app was just reinstalled (quit and relaunch once). The hotkey itself never needs any permission.
+**Hotkey doesn't trigger.** Check the ⚠ badge next to the menu bar icon. Three common causes: the combo is taken by another app (pick another), the combo has no modifier, or the app was just reinstalled (quit and relaunch once). The hotkey itself never needs any permission.
 
 **Does an auto-brightness sensor fight the blackout?** The app re-asserts brightness 0 twice a second, so ambient-light changes won't light the screen up.
 
