@@ -271,9 +271,8 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 
 ## Known limitations
 
-- **Some external displays can't be turned off.** Dimming relies on the software brightness API, which most HDMI/DVI/DP monitors don't support, so those panels stay lit during a blackout. `lidkeep doctor` names the exact display. Powering them down would require true display sleep, which breaks remote frames — this tool deliberately doesn't do that.
-- The panel is **not powered down** — this is intentional. Backlight is driven to 0, so the framebuffer keeps rendering and screen-sharing / remote-desktop sessions keep working. True display sleep would break remote access; see [How it works](#how-it-works).
-- **Blackout is not a lock screen.** While blacked out, anyone with physical access to the keyboard can still operate the machine — they just can't see it. Lock manually (⌃⌘Q).
+- **External monitors may stay lit.** Blackout dims through the software brightness API, which most HDMI/DVI/DisplayPort panels don't expose. The built-in display goes fully dark; `lidkeep doctor` names any that don't. (Real display sleep would fix them, but it kills remote frames — deliberately avoided.)
+- **It's not a lock screen.** The machine stays fully usable to anyone at the keyboard — they just can't see it. Lock with ⌃⌘Q.
 
 ## Support this project
 
