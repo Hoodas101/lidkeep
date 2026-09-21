@@ -1,19 +1,8 @@
-<table>
-<tr>
-<td valign="middle">
+<img src="docs/icon.png" width="100" align="right" alt="LidKeep app icon">
 
 # LidKeep
 
 **Turn the display off. Don't let the Mac sleep.**
-
-</td>
-<td width="150" align="center" valign="middle">
-
-<img src="docs/icon.png" width="100" alt="LidKeep app icon">
-
-</td>
-</tr>
-</table>
 
 The screen goes pitch black; the machine keeps working. Remote desktop stays connected, downloads keep going, builds keep running. Press a hotkey (or run one command over SSH) and the picture comes straight back.
 

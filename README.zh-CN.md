@@ -1,19 +1,8 @@
-<table>
-<tr>
-<td valign="middle">
+<img src="docs/icon.png" width="112" align="right" alt="LidKeep app icon">
 
 # LidKeep
 
 **关掉屏幕，但别让 Mac 睡。**
-
-</td>
-<td width="150" align="center" valign="middle">
-
-<img src="docs/icon.png" width="112" alt="LidKeep app icon">
-
-</td>
-</tr>
-</table>
 
 屏幕一黑，机器照常跑：远程桌面还在线、下载还在、构建还在。按一下热键（或在 SSH 里敲一条命令），画面立刻回来。
 
