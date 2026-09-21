@@ -1,4 +1,4 @@
-<img src="docs/icon.png" width="100" align="right" alt="LidKeep app icon">
+<img src="docs/icon.png" width="50" align="right" alt="LidKeep app icon">
 
 # LidKeep
 
