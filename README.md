@@ -1,4 +1,4 @@
-<img src="docs/icon.png" width="112" align="right" alt="LidKeep app icon">
+<img src="docs/icon.png" width="100" align="right" alt="LidKeep app icon">
 
 # LidKeep
 
@@ -11,7 +11,7 @@ The screen goes pitch black; the machine keeps working. Remote desktop stays con
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/Hoodas101/lidkeep/build.yml?label=build)](../../actions/workflows/build.yml)
 
-Chinese: [README.zh-CN.md](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+中文: [README.zh-CN.md](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 **Get LidKeep (one line):**
 
