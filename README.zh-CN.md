@@ -13,6 +13,12 @@
 
 English: [README.md](README.md) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全](SECURITY.md)
 
+**一行装好 LidKeep：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
+```
+
 ```
 $ lidkeep off      # 屏幕熄灭，系统继续跑
 $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
@@ -285,7 +291,7 @@ make clean
 
 ## 打赏支持
 
-如果这个项目帮到你，**⭐ [点个 Star](../../stargazers)** 是最省事也最实在的帮助；问题与想法欢迎来 [Discussions](../../discussions) 聊。
+LidKeep 是**一个人**在做和维护。每个 Issue 都会被读、绝大多数修复几天内落地；欢迎提 PR。如果这个项目帮到你，**⭐ [点个 Star](../../stargazers)** 是最省事也最实在的帮助；问题与想法欢迎来 [Discussions](../../discussions) 聊。
 
 如果想再进一步，欢迎请作者喝杯咖啡 —— 每一杯都是持续更新的动力 ☕
 
@@ -295,6 +301,10 @@ make clean
 </p>
 
 **国际支付（无需大陆银行卡）：** GitHub Sponsors、Ko-fi、PayPal *正在由作者接入* —— 开通后链接会补到这里。在那之前，点个 ⭐ Star 或提个详细 Issue，帮助比想象中大。
+
+## Star 历史
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Hoodas101/lidkeep&type=Date)](https://star-history.com/#Hoodas101/lidkeep&Date)
 
 **现在就想用信用卡 / PayPal？** GitHub Sponsors 在 `github.com/Hoodas101/lidkeep` 开通后即可全球可用，无需任何中国支付账号。
 

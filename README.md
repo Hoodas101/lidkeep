@@ -13,6 +13,12 @@ The screen goes pitch black; the machine keeps working. Remote desktop stays con
 
 Chinese: [README.zh-CN.md](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
+**Get LidKeep (one line):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
+```
+
 ```
 $ lidkeep off      # screen goes black, system keeps running
 $ lidkeep on       # display restored (also works over SSH)
@@ -283,7 +289,7 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 
 ## Support this project
 
-If this project saves you time, **⭐ [star the repo](../../stargazers)** — it's the easiest way to help and costs nothing. Questions and ideas are welcome in [Discussions](../../discussions).
+LidKeep is built and maintained by a single developer. Bug reports and pull requests are answered promptly — every report is read, and most fixes land within a few days. If this project saves you time, **⭐ [star the repo](../../stargazers)** — it's the easiest way to help and costs nothing. Questions and ideas are welcome in [Discussions](../../discussions).
 
 If you'd like to go further, buying me a coffee keeps it going ☕
 
@@ -295,6 +301,10 @@ If you'd like to go further, buying me a coffee keeps it going ☕
 **International options (no mainland bank card needed):** GitHub Sponsors, Ko-fi and PayPal are *being set up by the maintainer* — links will appear here once enabled. Until then, a ⭐ star or a detailed bug report helps this project more than you might think.
 
 **Prefer card / PayPal now?** You can also sponsor via GitHub Sponsors once it's enabled at `github.com/Hoodas101/lidkeep` — that route works worldwide and needs no Chinese payment account.
+
+## Star history
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Hoodas101/lidkeep&type=Date)](https://star-history.com/#Hoodas101/lidkeep&Date)
 
 ## License
 
