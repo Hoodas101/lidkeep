@@ -9,7 +9,7 @@
 #
 # 慢用例的门控（两者需要相反的运行条件，各跑一次才全覆盖）：
 #   SMOKE_FULL=1 + App 未常驻  → 跑【11】合盖守护掉电自停
-#   SMOKE_FULL=1 + App 常驻    → 跑【14】息屏保持唤醒的电量下限释放
+#   SMOKE_FULL=1 + App 常驻    → 跑【13】常亮的电量下限释放、【14】息屏保持唤醒的电量下限释放
 # 无论哪次运行，脚本都会在结尾把 config.json 还原成跑之前那份。
 #
 # 用法:
@@ -483,6 +483,60 @@ rm -f "$SUP_DIR/nosleep.pid"
 n=$(daemon_pids | wc -l | tr -d ' ')
 [ "$n" = "0" ] && ok "nosleep off 把 pid 文件之外的守护也收干净" \
                || bad "off 之后仍残留 $n 个守护（系统会一直不睡）"
+
+# ---------- 13. 电量守卫必须认得「保持屏幕常亮」的断言（端到端，较慢） ----------
+echo
+echo "【13】保持屏幕常亮的电量下限释放（需 SMOKE_FULL=1 且 App 常驻，约 60 秒）"
+# 与【14】互补：【14】测「息屏后保持唤醒」（caffeinate -is），这条测「保持屏幕常亮」（caffeinate -d）。
+# displayCaff 曾是守卫准入条件里唯一漏掉的一条 —— 它独立于黑屏长期持有，且是唯一
+# 「屏幕整夜亮着」的形态；漏掉的后果是插着电池一路放电到自动关机，而保护全程不介入。
+# 本程序同时可能持有三条参数各异的 caffeinate 断言（-d / -is / -dis），
+# 据此把它们区分开，不靠猜测。
+#
+# ⚠️ 前提：常驻的 App 必须是**本次构建装上去的那份**。本用例验证的是新加的电量拦截，
+# 若 /Applications 里仍是旧版，App 根本不会释放 displayCaff，这里会报失败 ——
+# 那是**假失败**，不是代码回归。跑前先 `make install`，再让 App 重启（launchd 会自动拉起）。
+# 【14】没有这个前提：它测的 keepCaff 拦截在更早的版本里就已存在。
+display_caff_cmd() {
+    for p in $(pgrep -x caffeinate 2>/dev/null); do
+        pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+        case "$(ps -o command= -p "$pp" 2>/dev/null)" in
+            *LidKeep*) ps -o command= -p "$p" 2>/dev/null | grep 'caffeinate -d -w' ;;
+        esac
+    done
+}
+if [ "${SMOKE_FULL:-0}" != "1" ]; then
+    skip_ "常亮的电量释放" "默认跳过，设 SMOKE_FULL=1 启用"
+elif [ "$has_service" -eq 0 ]; then
+    skip_ "常亮的电量释放" "该断言由菜单栏 App 持有，需 App 常驻"
+elif [ "$HAVE_PS" = "0" ]; then
+    skip_ "常亮的电量释放" "本环境 ps 不可用，分不开 -d / -is / -dis 三条断言"
+else
+    printf '80,ac,charging' > "$SUP_DIR/_sim-battery"
+    "$B" config --battery 20 >/dev/null 2>&1
+    "$B" config --battery-action 0 >/dev/null 2>&1      # 触底：只恢复屏幕（也必须放开常亮）
+    # 两套方案都开：切到电池方案后断言仍该在，于是「断言消失」只可能来自电量守卫，
+    # 不会与电源方案切换混为一谈（那是另一条路径，【14】已覆盖）。
+    "$B" plan --display-on on >/dev/null 2>&1
+    sleep 5
+    if [ -z "$(display_caff_cmd)" ]; then
+        skip_ "常亮的电量释放" "断言未装上（无可用亮度接口，或已被电量下限拦下）"
+    else
+        printf '10,batt,discharging' > "$SUP_DIR/_sim-battery"
+        released=0
+        for _ in $(seq 1 30); do
+            sleep 2
+            if [ -z "$(display_caff_cmd)" ]; then released=1; break; fi
+        done
+        if [ "$released" = "1" ]; then
+            ok "电量触底后常亮断言被撤销（不会亮着屏幕放电到关机）"
+        else
+            bad "电量低于下限已 60 秒，常亮断言仍在持有（若常驻的是旧版 App，请先 make install 再跑）"
+        fi
+    fi
+    rm -f "$SUP_DIR/_sim-battery"
+    "$B" plan --display-on off >/dev/null 2>&1
+fi
 
 # ---------- 14. 电量守卫必须认得「息屏后保持唤醒」的断言（端到端，较慢） ----------
 echo

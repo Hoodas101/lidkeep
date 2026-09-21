@@ -13,14 +13,10 @@ import Darwin
 
 // MARK: - 路径（与 CLI 完全一致）
 
-// 防睡眠 Level 2（覆盖电池与合盖）所需。caffeinate -s 按 man page 明写「仅 AC 有效」，
-// 所以电池与合盖只能靠 pmset disablesleep，而它需要 root。
-// 关屏被拒绝（电量过低 / 亮度接口不可用）时的回传：CLI off 读完即清
+/// 登录项 plist 路径。**是否真的生效以 launchd 的注册状态为准**：
+/// 文件在而没 bootstrap 时，开机并不会启动（见 isLoginItemEnabled）。
 let barPlist = home + "/Library/LaunchAgents/com.lidkeep.bar.plist"
-// 合盖模式托管的 CLI 守护进程的 pid 文件（与 CLI 命名一致）
-/// 电池仿真钩子（文件版）。内容同 LK_SIMULATE_BATTERY：`电量,batt|ac,discharging|charging`。
-/// 环境变量只在进程启动时读一次，测「运行中拔插电源」必须靠一个能被外部改写的位置。
-/// 文件不存在时完全走真实 pmset，不影响正常使用。
+
 /// CLI 二进制路径：合盖模式以独立的 CLI 守护进程持有 disablesleep，
 /// 从而在持有者账本里与黑屏联动（App 自身 pid）互不干扰。
 let cliCandidates = ["/opt/homebrew/bin/lidkeep", "/usr/local/bin/lidkeep"]
@@ -85,7 +81,22 @@ func blog(_ s: String) {
 // 不做单独持久化，因此不存在两份真值漂移；CLI 侧也仍照旧读这三个布尔。
 
 /// 当前是否由电池供电（测试钩子 LK_SIMULATE_BATTERY 见 batteryStatus）
-func onBatteryNow() -> Bool { batteryStatus().onBattery }
+///
+/// 1 秒短缓存：`activePlan` 与 `refreshUI` 都要问「现在是不是电池」，而每次提问都会
+/// spawn 一个 `pmset -g batt` 进程 —— 打开一次菜单因此创建约 3 个进程，
+/// 对一个以省电为卖点的常驻工具来说，这笔开销本不该有。同一次 UI 刷新里的重复提问
+/// 间隔只有微秒，缓存 1 秒足以把它们合并掉。
+///
+/// 刻意**不做更长**：`_sim-battery` 文件钩子会在运行中被测试改写（拔插电源的端到端用例），
+/// 读旧值会让那些用例得到与事实相反的结论；而真实的拔插电源是人工动作，
+/// 电源轮询本身就是 15 秒一次，1 秒的滞后无感。
+private var cachedOnBattery: (value: Bool, at: Date)?
+func onBatteryNow() -> Bool {
+    if let c = cachedOnBattery, Date().timeIntervalSince(c.at) < 1.0 { return c.value }
+    let v = batteryStatus().onBattery
+    cachedOnBattery = (v, Date())
+    return v
+}
 
 /// 电源来源的名字，用于菜单与日志
 func powerSourceTitle(battery: Bool) -> String { battery ? L("使用电池") : L("接通电源") }
@@ -384,31 +395,58 @@ final class ScreenController {
     /// 不退的话，方案里写着 nothing、菜单与面板都显示「合盖不睡」，而守护根本没在跑——
     /// 用户带着「合盖也不会睡」的预期把机器塞进包里，正是最贵的那种错觉。
     /// 电量触底「彻底放手」时，把当前电源来源那一套方案退回系统默认行为：
-    /// 合盖睡眠 + 不再要求息屏保持唤醒。另一套保持不动——用户可能只在接电时才需要它。
+    /// 合盖睡眠 + 不再要求息屏保持唤醒 + 不再保持屏幕常亮。另一套保持不动——
+    /// 用户可能只在接电时才需要它。
     ///
     /// 为什么必须连 keepAwake 一起清掉：只停断言的话，方案里仍写着「息屏后保持唤醒」，
     /// 下一次周期对齐（配置重载 / 电源切换）会立刻把断言装回去，
     /// 「电量触底彻底放手」等于没做，机器照样在包里耗到关机。
+    /// displayOn 同理：它是四条耗电路径里最费电的一条，留着就等于没放手。
     func rollbackPlanToSystemDefaults(reason: String) {
         var c = loadConfig()
         if onBatteryNow() {
-            guard c.planBattery.lid != .sleep || c.planBattery.keepAwake else { return }
+            guard c.planBattery.lid != .sleep || c.planBattery.keepAwake || c.planBattery.displayOn
+            else { return }
             c.planBattery.lid = .sleep
             c.planBattery.keepAwake = false
+            c.planBattery.displayOn = false
         } else {
-            guard c.planAC.lid != .sleep || c.planAC.keepAwake else { return }
+            guard c.planAC.lid != .sleep || c.planAC.keepAwake || c.planAC.displayOn
+            else { return }
             c.planAC.lid = .sleep
             c.planAC.keepAwake = false
+            c.planAC.displayOn = false
         }
         projected(&c, from: activePlan(c))
         saveConfig(c)
         cfg = c
-        blog("bar: 电量保护触发（\(reason)），当前方案已退回「合盖睡眠 + 不强制唤醒」")
+        blog("bar: 电量保护触发（\(reason)），当前方案已退回「合盖睡眠 + 不强制唤醒 + 不保持常亮」")
     }
 
-    var nosleepLevelText: String {
-        guard nosleepOn else { return L("未开启") }
-        return nosleepSystemOn ? L("系统级（含电池与合盖）") : L("进程级（仅电源适配器）")
+    /// 「保持屏幕常亮」单独放手：停断言 **并且** 清掉当前电源方案里的 displayOn。
+    ///
+    /// 为什么不能只靠 rollbackPlanToSystemDefaults：那条路径同时清掉合盖与息屏保持唤醒，
+    /// 而触底动作选「只恢复屏幕」的用户恰恰是想**保留**防睡眠、只把屏幕常亮放开。
+    /// 两种意图不同，必须分开走。
+    ///
+    /// 为什么必须连方案一起清：只停断言的话，方案里仍写着 displayOn=true，
+    /// 下一次周期对齐（配置重载 / 电源切换 / 巡检）会立刻把断言装回去，
+    /// 「电量触底放手」等于没做 —— 屏幕照样整夜亮着放电到关机。
+    /// 只动「当前电源来源」那套：用户可能只在接电时才需要常亮。
+    func releaseKeepDisplayOn(reason: String) {
+        var c = loadConfig()
+        if onBatteryNow() {
+            guard c.planBattery.displayOn else { return }
+            c.planBattery.displayOn = false
+        } else {
+            guard c.planAC.displayOn else { return }
+            c.planAC.displayOn = false
+        }
+        projected(&c, from: activePlan(c))
+        saveConfig(c)
+        cfg = c
+        blog("bar: 电量保护触发（\(reason)），已关闭「保持屏幕常亮」")
+        syncKeepDisplayOn()
     }
 
     /// 黑屏期间持有 caffeinate，阻止空闲/显示器睡眠（-w 保证退出即回收）
@@ -474,8 +512,23 @@ final class ScreenController {
     // 注意与主动关屏不冲突：-d 挡的是「系统自动熄屏」，用户主动把亮度归零照样生效。
     var displayCaff: Process?
 
+    /// 此刻是否真的持有「保持屏幕常亮」的断言（菜单与面板据此标注「未生效」）
+    var keepDisplayOnActive: Bool { displayCaff != nil }
+
     func startKeepDisplayOn() {
         guard displayCaff == nil else { return }
+        // 电量下限对「保持屏幕常亮」同样强制生效。它是本程序里唯一「屏幕整夜亮着」的
+        // 形态，也是耗电最快的一条 —— 低于下限还去开，等于把「包里放电到关机」铺平。
+        // 与另外三条耗电路径（关屏 / 防睡眠 / 息屏后保持唤醒）保持同一套拦截。
+        // 只记日志、不弹通知：本函数会被周期对齐反复调用，弹窗会变成骚扰
+        // （与 startKeepAwakeAssertion 的 notifyOnBlock 同一取舍）。
+        if batteryBlocksStart(cfg) {
+            let b = batteryStatus()
+            blog("bar: " + L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)"
+                 + L("%，已取消「保持屏幕常亮」（避免耗尽电池）"))
+            onStateChange?()
+            return
+        }
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         c.arguments = ["-d", "-w", String(ProcessInfo.processInfo.processIdentifier)]
@@ -631,11 +684,14 @@ final class ScreenController {
         battNotified = false
         guard cfg.batteryFloor > 0 else { return }
         let t = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            // 四种「正在耗电」的状态都要盯：漏掉任何一种，那条路径上的下限就形同虚设。
+            // 五种「正在耗电」的状态都要盯：漏掉任何一种，那条路径上的下限就形同虚设。
             // keepCaff 尤其容易漏——它是**独立于黑屏**长期持有的断言，
             // 掀盖息屏后机器会一直跑，正是最容易在包里放电到关机的形态。
+            // displayCaff 同样独立于黑屏长期持有，且是唯一「屏幕整夜亮着」的形态：
+            // 漏掉它的后果最直接——屏幕亮到电池耗尽、系统直接断电关机。
             guard let self = self,
-                  self.blacked || self.nosleepOn || self.lidOn || self.keepCaff != nil else { return }
+                  self.blacked || self.nosleepOn || self.lidOn
+                    || self.keepCaff != nil || self.displayCaff != nil else { return }
             let b = batteryStatus()
             guard b.onBattery && b.discharging, b.percent <= self.cfg.batteryFloor else {
                 self.battNotified = false       // 插上电或充回来了，解除提醒锁
@@ -649,6 +705,10 @@ final class ScreenController {
             switch BatteryAction(rawValue: self.cfg.batteryAction) ?? .restoreOnly {
             case .restoreOnly:
                 if self.blacked { self.restore() }
+                // 「恢复屏幕」覆盖不到常亮：它本来就没黑屏，是独立于黑屏持有的断言。
+                // 不在这里放手的话，默认动作在「只开了常亮」的场景下等于什么都没做 ——
+                // 而那正是屏幕整夜亮着、放电到自动关机的那条路径。
+                self.releaseKeepDisplayOn(reason: (L("电量已达下限 ") + "\(self.cfg.batteryFloor)" + "%"))
             case .restoreAndRelease:
                 self.releaseForBattery((L("电量已达下限 ") + "\(self.cfg.batteryFloor)" + "%"))
             case .notifyOnly:
@@ -816,11 +876,15 @@ final class ScreenController {
                 _ = ScreenController.shared.reconcileLidDaemon(want: true, why: "启动恢复")
             }
         } else if lidDaemonPid() != nil {
-            // 当前方案不要求合盖运行，守护却还活着——上一次是在另一个电源来源下开的。
-            // 不关掉的话用户拔掉电源后依然「合盖不睡」，电池会在包里悄悄耗尽。
+            // 当前方案不要求合盖运行，守护却还活着——可能是上一次在另一个电源来源下开的，
+            // 也可能是用户手动 `lidkeep nosleep on --system` 起的。
+            // 归属语义：以方案为准（对齐是既定行为），但**不能静默**撤销 ——
+            // 手动敲的命令被 GUI 启动悄悄翻掉，用户只会认为「设置不管用」，
+            // 而且他没有任何线索知道该去哪里改回来。
             blog("bar: 当前电源方案不要求合盖运行，停止遗留的合盖守护")
             _ = setLidAwake(false)
             cfg = loadConfig()
+            notifyUser(L("已按当前电源方案停止「合盖不睡」。如需长期保留，请把该方案的「合盖时」设为「保持唤醒」。"))
         }
 
         // 「保持屏幕常亮」同样是持久标志：重启后按配置恢复，否则用户会以为还开着
@@ -944,7 +1008,12 @@ final class ScreenController {
         var stamp = m
         if let old = configMtime, m > old {
             var newCfg = loadConfig()
+            // hotkeyEnabled 也算「需要重装热键」——installHotkey() 正是用它决定注不注册。
+            // 只比 keyCode/modFlags 的话，`lidkeep config --hotkey off` 改完盘、App 也重载了
+            // 配置，却不会去注销那个已注册的热键：用户以为关掉了，热键仍然生效，
+            // 菜单栏也不会给出任何异常提示（hotkeyReady 仍为 true）。
             let keyChanged = newCfg.keyCode != cfg.keyCode || newCfg.modFlags != cfg.modFlags
+                || newCfg.hotkeyEnabled != cfg.hotkeyEnabled
             // 外部（CLI / 手动编辑）可能改动了方案。三布尔是方案的投影，
             // 由常驻进程按自己的电源判断重新推导——否则两端判断不一致时
             // 就会留下「配置写着一套、机器按另一套跑」的分叉状态。
@@ -1028,7 +1097,7 @@ final class HotkeyRecorder: NSButton {
     /// 外部写入的展示文本
     var displayText: String = "" { didSet { if !recording { refreshTitle() } } }
     private(set) var recording = false { didSet { refreshTitle() } }
-    /// 录��期间临时摘下的菜单快捷键，结束时要装回去
+    /// 录制期间临时摘下的菜单快捷键，结束时要装回去
     private var savedEquivalents: [(NSMenuItem, String)] = []
 
     /// 纯修饰键的虚拟键码，只按这些键时不算录入完成
@@ -1524,6 +1593,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         // 同一口径：「息屏后保持唤醒」也有装不上断言的时候（电量低于下限），
         // 用了比菜单更短的措辞，避免与上一个标记叠加后顶到卡边缘被截断
         if curPlan.keepAwake && !ctl.systemSleepBlocked { sum += L("（息屏唤醒未生效）") }
+        // 同一口径：「保持屏幕常亮」同样会被电量下限拦下（见 startKeepDisplayOn），
+        // 此时勾选框仍是打开的——不标注就等于面板在说谎
+        if curPlan.displayOn && !ctl.keepDisplayOnActive { sum += L("（常亮未生效）") }
         planSummaryLabel?.stringValue = sum
         // 文案在 1 行与 2 行之间变化（英文长句会折行），必须让 label 重算固有高度，
         // 否则折行后仍按一行的高度排版，最后一行被裁掉
@@ -1679,9 +1751,24 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         cfg.timeout = timeoutChoices[timeoutPop.indexOfSelectedItem].1
         commit()
     }
+    /// 滑块此刻是否正被拖动。
+    ///
+    /// NSSlider 默认 `isContinuous = true`：拖一次会触发几十次 action，而 `commit()` 要
+    /// 写盘 + 注销并重新注册全局热键 + 重建整个面板 —— 全量执行会让拖动明显卡顿，
+    /// 且热键在拖动期间被反复注销/注册，中间存在短暂的失效窗口。
+    /// 所以拖动中只更新数值回显，松手那一次才落盘。
+    ///
+    /// 不用 `isContinuous = false` 代替：那样拖动过程中数值回显就不再更新了，
+    /// 用户拖到哪一格完全看不见。
+    private var isDraggingSlider: Bool {
+        guard let e = NSApp.currentEvent else { return false }   // 非鼠标触发（如键盘）→ 直接提交
+        return e.type == .leftMouseDown || e.type == .leftMouseDragged
+    }
+
     @objc private func onBatterySliderChanged(_ sender: Any?) {
         cfg.batteryFloor = Int(battSlider.intValue)
         battValueLabel.stringValue = cfg.batteryFloor == 0 ? L("不限制") : "\(cfg.batteryFloor)%"
+        guard !isDraggingSlider else { return }
         commit()
     }
     @objc private func onBatteryActionSelected(_ sender: NSButton) {
@@ -1697,6 +1784,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     @objc private func onSliderChanged(_ sender: Any?) {
         restoreValueLabel.stringValue = "\(Int(restoreSlider.doubleValue))%"
         if restorePop.indexOfSelectedItem == 1 { cfg.restoreFixed = Float(restoreSlider.doubleValue / 100) }
+        guard !isDraggingSlider else { return }
         commit()
     }
     @objc private func onAutoUpdateToggled(_ sender: Any?) {

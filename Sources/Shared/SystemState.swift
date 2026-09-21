@@ -35,10 +35,16 @@ let sudoersPath = "/etc/sudoers.d/lidkeep"
 // MARK: - 通用子进程调用
 /// 捕获 stdout。必须先读再 waitUntilExit：子进程输出超过管道缓冲时，
 /// 先等待会与子进程互相阻塞形成死锁。
+///
+/// stderr 一律**丢弃**（nullDevice），不要接一个从不读取的 Pipe ——
+/// 那正是同一个死锁的另一种写法：子进程把 stderr 写满缓冲后卡在 write 上，
+/// waitUntilExit 永远不返回，调用方（App 或 CLI）就此整体挂死。
+/// 本函数只消费 stdout，没有任何调用方解析 stderr。
 func runCapture(_ exe: String, _ a: [String]) -> String? {
     let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = a
     p.standardInput = FileHandle.nullDevice
-    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+    p.standardError = FileHandle.nullDevice
+    let pipe = Pipe(); p.standardOutput = pipe
     do { try p.run() } catch { return nil }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     p.waitUntilExit()

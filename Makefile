@@ -95,6 +95,10 @@ build/LidKeep.app: Sources/Bar/main.swift Sources/Info.plist Sources/AppIcon.icn
 	lipo -create $(foreach t,$(TARGETS),build/lk_$(t)) -output build/LidKeep.app/Contents/MacOS/LidKeep
 	cp Sources/Info.plist build/LidKeep.app/Contents/Info.plist
 	cp Sources/AppIcon.icns build/LidKeep.app/Contents/Resources/AppIcon.icns
+	@# 签名前先清掉上次失败留下的 *.cstemp：--deep 会把残留当成待签子组件而再次失败，
+	@# 于是每次构建都签不上名（错误被 2>/dev/null 吞掉，完全静默），App 停留在
+	@# linker-signed 状态——签名标识退化成中间产物名 lk_<target>、Info.plist 未绑定。
+	@rm -f build/LidKeep.app/Contents/MacOS/*.cstemp*
 	-codesign --force --deep -s - build/LidKeep.app 2>/dev/null
 	@echo "==> 构建完成: build/LidKeep.app"
 

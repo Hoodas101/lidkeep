@@ -3,8 +3,9 @@
 // 设计要点:
 //  1. 采用「亮度归零」而非「显示器硬件睡眠」，确保屏幕共享/远程桌面仍能正常抓帧，
 //     且任何按键鼠标都不会意外恢复显示（恢复完全由本程序控制）。
-//  2. 黑屏期间由 caffeinate -is 持有断言，阻止系统空闲睡眠；不含 -d，
-//     以免把「显示器睡眠」也一并挡住 —— 合盖熄屏正需要显示器能灭。
+//  2. 黑屏期间由 caffeinate -di 持有断言（开了「关屏联动防睡眠」时升级为 -dis）：
+//     这里的 -d 是**要的** —— 屏幕已被我们压黑，不该再让显示器睡眠把帧缓冲拆掉。
+//     真正不能带 -d 的是合盖守护，它必须让显示器能灭（见 runNosleepDaemon）。
 //  3. 以 0.5s 周期重设亮度为 0，压制环境光自动亮度。
 //  4. 两种运行形态:
 //     - 常驻服务(launchd): 热键 / CLI 信号 均可切换开关，开机自启
@@ -894,8 +895,20 @@ func spawnNosleepDaemon(wantSystem: Bool, timeout: TimeInterval?) -> (pid: Int32
 // 注册动作本身见 Sources/Shared/SystemState.swift —— 两端共用一份，
 // 这里只负责把结果写进日志（CLI 是 stdout，Bar 是日志文件，措辞不必一致）。
 
-func installHotkey(keyCode: Int64, modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_CMD, fire: @escaping () -> Void) {
+/// 注册全局热键。
+///
+/// `enabled == false` 时注销并记一条日志，与菜单栏 App 的语义完全一致：
+/// **用户主动关掉热键不是「注册失败」**，不该在日志里留下警示。
+/// 早先这里无条件注册，于是 `lidkeep config --hotkey off` 对 CLI 常驻服务与一次性
+/// daemon 完全无效 —— 配置写着停用，热键照旧生效（连重启都救不回来）。
+func installHotkey(keyCode: Int64, modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_CMD,
+                   enabled: Bool = true, fire: @escaping () -> Void) {
     carbonFire = fire
+    guard enabled else {
+        unregisterCarbonHotKey()
+        log(L("全局热键已按设置停用"))
+        return
+    }
     let st = registerCarbonHotKey(keyCode: keyCode, modFlags: modFlags)
     if st == noErr {
         log((L("全局热键已注册 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + L("（Carbon 链路，无需授权）")))
@@ -1033,7 +1046,8 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     }
     RunLoop.main.add(sigTimer, forMode: .common)
 
-    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags) { log(L("热键触发")); cleanup() }
+    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags,
+                  enabled: cfg.hotkeyEnabled) { log(L("热键触发")); cleanup() }
 
     if let t = timeout {
         Timer.scheduledTimer(withTimeInterval: t, repeats: false) { _ in log(L("超时自动恢复")); cleanup() }
@@ -1164,9 +1178,15 @@ func runService(keyCode: Int64) -> Never {
               let m = a[.modificationDate] as? Date else { return }
         if let old = configMtime, m > old {
             let n = loadConfig()
+            // hotkeyEnabled 同样要触发重装：关掉它必须真的把已注册的热键注销掉，
+            // 只比 keyCode/modFlags 的话「停用」这个动作对运行中的服务完全无效。
             let keyChanged = n.keyCode != cfg.keyCode || n.modFlags != cfg.modFlags
+                || n.hotkeyEnabled != cfg.hotkeyEnabled
             cfg = n
-            if keyChanged { installHotkey(keyCode: cfg.keyCode, modFlags: cfg.modFlags, fire: hotkeyAction) }
+            if keyChanged {
+                installHotkey(keyCode: cfg.keyCode, modFlags: cfg.modFlags,
+                              enabled: cfg.hotkeyEnabled, fire: hotkeyAction)
+            }
             if blacked { scheduleGuards() }
             log((L("配置已自动重载 热键=") + "\(modsText(cfg.modFlags))" + "\(keyName(cfg.keyCode))"))
         }
@@ -1226,7 +1246,8 @@ func runService(keyCode: Int64) -> Never {
         exit(0)
     }
 
-    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags, fire: hotkeyAction)
+    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags,
+                  enabled: cfg.hotkeyEnabled, fire: hotkeyAction)
 
     // 信号：CLI 用 SIGUSR1(关)/SIGUSR2(开)/SIGTERM(退出)，经命令文件 + 标志双通道。
     // 传统 handler 置位全局标志，主循环 Timer 轮询执行（AppKit 下 GCD signal source 不可靠）。
@@ -1422,6 +1443,10 @@ func runDoctor() -> Int32 {
     let c = loadConfig()
     print((L("  热键 ") + "\(modsText(c.modFlags))" + "\(keyName(c.keyCode))" + L("　兜底 ") + "\(Int(c.timeout))" + L("s　"))
           + (L("电量下限 ") + "\(c.batteryFloor)" + L("%　关屏联动防睡眠 ") + "\(c.autoNosleep ? L("开") : L("关"))"))
+    // 上面那三个布尔只是**投影**，电源方案才是真值（见 Sources/Shared/Config.swift）。
+    // 只报投影的话，用户排查「合盖为什么不睡」时看到的只有 autoNosleep=关，
+    // 看不到 planAC.lid 究竟设成了什么 —— 而后者才是他真正保存下来的那个值。
+    printPlans(c)
     if c.modFlags == 0 {
         errors.append(L("热键无修饰键"))
         print(L("  ❌ 热键未带修饰键：系统不会注册，等于没有热键（lidkeep config --mods cmd,shift --key 0）"))
