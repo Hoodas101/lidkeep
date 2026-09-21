@@ -6,7 +6,8 @@
 #
 # 用法：
 #   ./capture-promo.sh menu        # 菜单展开截图
-#   ./capture-promo.sh settings    # 设置面板截图
+#   ./capture-promo.sh settings    # 设置面板整屏截图（后续手动裁剪）
+#   ./capture-promo.sh settings-win# 设置窗口自动按窗口 ID 截取（无需裁剪）
 #   ./capture-promo.sh gif         # 录 12 秒演示并转成 GIF
 #   ./capture-promo.sh all
 
@@ -54,6 +55,25 @@ do_settings() {
   echo "  裁出设置窗口后另存为："
   echo "    $OUT/settings.png"
   echo "  整屏文件含你的桌面内容，用完请删除。"
+}
+
+# 自动按窗口 ID 截取设置窗口（无需手动裁剪）。
+# 用 lsappinfo 找到 LidKeep 的设置窗口，screencapture -l <windowid> 只截取该窗口。
+do_settings_win() {
+  echo "【设置窗口自动截取】"
+  echo "  请在倒计时内从菜单打开「设置…」，让窗口停在屏幕上（不要最小化）。"
+  countdown 6
+  local wid
+  wid="$(lsappinfo windows LidKeep 2>/dev/null \
+        | awk -F'WindowID=' '/WindowID=/{print $2; exit}')"
+  if [ -z "$wid" ]; then
+    echo "  ⚠️ 没找到 LidKeep 的窗口，回退到整屏截取（请手动裁剪）。"
+    screencapture -x -o "$OUT/.settings-full.png"
+    echo "  整屏已存：$OUT/.settings-full.png，请裁出设置窗口另存为 $OUT/settings.png"
+    return
+  fi
+  screencapture -x -l "$wid" "$OUT/settings.png"
+  echo "  ✅ 已自动截取设置窗口：$OUT/settings.png"
 }
 
 do_gif() {

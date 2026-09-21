@@ -9,8 +9,9 @@
 [![Release](https://img.shields.io/github/v/release/Hoodas101/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#环境要求)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Build](https://img.shields.io/github/actions/workflow/status/Hoodas101/lidkeep/build.yml?label=build)](../../actions/workflows/build.yml)
 
-English: [README.md](README.md)
+English: [README.md](README.md) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全](SECURITY.md)
 
 ```
 $ lidkeep off      # 屏幕熄灭，系统继续跑
@@ -225,7 +226,7 @@ sudo lidkeep nosleep uninstall-helper  # 卸载（先复位再删除）
 
 ## 还有这些细节
 
-- **无需授权的热键**。全局热键走 Carbon `RegisterEventHotKey`，由 WindowServer 直接派发 —— 不需要「辅助功能」或「输入监控」任何授权，反复重编译重装也不失效（ad-hoc 签名的二进制每次重编译都会丢 TCC 授权，是这类小工具最常见的坑）。
+- **热键无需任何授权**。全局热键走 Carbon `RegisterEventHotKey`，由 WindowServer 直接派发 —— 不需要「辅助功能」或「输入监控」任何授权，反复重编译重装也不失效（ad-hoc 签名的二进制每次重编译都会丢 TCC 授权，是这类小工具最常见的坑）。**唯一例外**：合盖「保持唤醒」需要下面那个特权 helper，会一次性要你输一次管理员密码（见「为什么系统级需要特权 helper？」与 [SECURITY.md](SECURITY.md)）。
 - **崩溃安全**。黑屏期间进程被意外杀死，下次启动自动恢复原亮度；另有可配兜底超时（默认 12 小时）作最后安全网。
 - **电量保护**。仅电池且放电时生效：低于下限（默认 20%）拒绝关屏；黑屏期间每 30 秒复查，跌破立即恢复并通知。插电不干预。可在设置面板或 `lidkeep config --battery 0` 关闭。
 - **CLI 与 App 状态互通**。SSH 里 `lidkeep on` 能唤醒菜单栏 App 关掉的屏幕，反之亦然。
@@ -271,6 +272,12 @@ make clean
 
 `make test` 自动跳过当前环境跑不了的用例（如菜单栏 App 常驻时不做真实关屏，避免打断会话）；设 `SMOKE_FULL=1` 强制跑真实关屏 / 恢复。
 
+**构建要求：** macOS 13+ 且装了 Xcode Command Line Tools（`xcode-select --install`）。除它自带的 Swift 工具链外无任何第三方依赖；默认构建 universal binary（Apple Silicon + Intel）。
+
+> **注意 —— `make all` 会就地改写 `Sources/Info.plist`。** 它会把最新 git tag 的版本号写进 `<!--VERSION-->` 占位符，所以构建后 `git status` 会显示 `Sources/Info.plist` 被改动。这正是版本号与 tag 保持同步的机制；发布时把它一并提交即可（别跟它较劲）。
+
+**推广素材（截图 / 演示 GIF）：** 不入库 —— 用 `./dev-tools/capture-promo.sh`（menu / settings / `settings-win` / gif）在本地生成。脚本留倒计时让你摆好界面；`settings-win` 按窗口 ID 截取设置窗口，无需手动裁剪。原始整屏帧含你的桌面，已被 git 忽略。
+
 ## 已知限制
 
 - **外接显示器可能关不掉。** 关屏走软件亮度接口，多数 HDMI / DVI / DP 外接屏不暴露该接口，只有内建屏会真正熄灭；`lidkeep doctor` 会点名哪几块没灭（真正的显示器睡眠能让它们也灭，但会中断远程画面，故刻意不做）。
@@ -278,14 +285,18 @@ make clean
 
 ## 打赏支持
 
-如果这个项目帮到你，欢迎请作者喝杯咖啡 —— 每一杯都是持续更新的动力 ☕
+如果这个项目帮到你，**⭐ [点个 Star](../../stargazers)** 是最省事也最实在的帮助；问题与想法欢迎来 [Discussions](../../discussions) 聊。
+
+如果想再进一步，欢迎请作者喝杯咖啡 —— 每一杯都是持续更新的动力 ☕
 
 <p align="center">
   <img src="docs/donate-wechat.png" alt="微信打赏" width="220">&nbsp;&nbsp;
   <img src="docs/donate-alipay.jpg" alt="支付宝打赏" width="220">
 </p>
 
-**中国大陆以外？** 这两个码要绑定大陆银行卡的微信 / 支付宝，海外多半扫不了。国际支付（信用卡 / PayPal）在接；在那之前，点个 ⭐ Star 或提个 Issue，帮助比想象中大。
+**国际支付（无需大陆银行卡）：** GitHub Sponsors、Ko-fi、PayPal *正在由作者接入* —— 开通后链接会补到这里。在那之前，点个 ⭐ Star 或提个详细 Issue，帮助比想象中大。
+
+**现在就想用信用卡 / PayPal？** GitHub Sponsors 在 `github.com/Hoodas101/lidkeep` 开通后即可全球可用，无需任何中国支付账号。
 
 ## 许可
 

@@ -9,8 +9,9 @@ The screen goes pitch black; the machine keeps working. Remote desktop stays con
 [![Release](https://img.shields.io/github/v/release/Hoodas101/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Build](https://img.shields.io/github/actions/workflow/status/Hoodas101/lidkeep/build.yml?label=build)](../../actions/workflows/build.yml)
 
-Chinese: [README.zh-CN.md](README.zh-CN.md)
+Chinese: [README.zh-CN.md](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ```
 $ lidkeep off      # screen goes black, system keeps running
@@ -223,7 +224,7 @@ To switch it temporarily or permanently: `LIDKEEP_LANG=zh lidkeep doctor` (`zh` 
 
 ## Details worth knowing
 
-- **No permissions needed.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries lose TCC grants on each recompile, the most common trap for small tools like this).
+- **No grants needed for the hotkey.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries lose TCC grants on each recompile, the most common trap for small tools like this). **One exception:** the lid-closed "Keep awake" mode needs the privileged helper below, which asks for your admin password **once** (see "Why does the system level need a privileged helper?" and [SECURITY.md](SECURITY.md)).
 - **Crash-safe.** If the app is killed while the screen is black, the next launch restores your previous brightness automatically. A configurable fallback timeout (default 12 h) is the last safety net.
 - **Battery guard.** Only on battery and discharging: below the floor (default 20%) a blackout is refused, and during a blackout the level is re-checked every 30 s — cross the floor and the display comes back with a notification. No effect on AC power. Disable with `lidkeep config --battery 0` or in the settings panel.
 - **CLI and app share state.** `lidkeep on` over SSH can restore a screen the menu bar app turned off, and vice versa.
@@ -269,6 +270,12 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 
 `make test` skips cases the current environment can't run (e.g. it won't do a real blackout while the menu bar app is live, since that would interrupt your session). Set `SMOKE_FULL=1` to force it.
 
+**Build requirements:** macOS 13+ with Xcode Command Line Tools (`xcode-select --install`). The Swift toolchain they provide is the only dependency; there are no third-party packages. A universal binary (Apple Silicon + Intel) is built by default.
+
+> **Note — `make all` rewrites `Sources/Info.plist` in place.** It stamps the version from the latest git tag into the `<!--VERSION-->` placeholder, so after a build `git status` will show `Sources/Info.plist` as modified. This is how the version number stays in sync with tags; commit it as part of a release (don't fight it).
+
+**Promo assets (screenshots / demo GIF):** they are *not* committed — generate them locally with `./dev-tools/capture-promo.sh` (menu / settings / `settings-win` / gif). The script leaves a countdown so you can arrange the UI; `settings-win` captures the settings window by its window ID so there is no manual cropping. The raw full-screen frames contain your desktop and are git-ignored.
+
 ## Known limitations
 
 - **External monitors may stay lit.** Blackout dims through the software brightness API, which most HDMI/DVI/DisplayPort panels don't expose. The built-in display goes fully dark; `lidkeep doctor` names any that don't. (Real display sleep would fix them, but it kills remote frames — deliberately avoided.)
@@ -276,14 +283,18 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 
 ## Support this project
 
-If this project saves you time, buying me a coffee keeps it going ☕
+If this project saves you time, **⭐ [star the repo](../../stargazers)** — it's the easiest way to help and costs nothing. Questions and ideas are welcome in [Discussions](../../discussions).
+
+If you'd like to go further, buying me a coffee keeps it going ☕
 
 <p align="center">
   <img src="docs/donate-wechat.png" alt="WeChat Pay" width="220">&nbsp;&nbsp;
   <img src="docs/donate-alipay.jpg" alt="Alipay" width="220">
 </p>
 
-**Elsewhere in the world?** These QR codes need a WeChat or Alipay account with a mainland bank card, so they won't work for everyone. An international option (card / PayPal) is on the way — until then, a ⭐ star or a bug report helps this project more than you might think.
+**International options (no mainland bank card needed):** GitHub Sponsors, Ko-fi and PayPal are *being set up by the maintainer* — links will appear here once enabled. Until then, a ⭐ star or a detailed bug report helps this project more than you might think.
+
+**Prefer card / PayPal now?** You can also sponsor via GitHub Sponsors once it's enabled at `github.com/Hoodas101/lidkeep` — that route works worldwide and needs no Chinese payment account.
 
 ## License
 
