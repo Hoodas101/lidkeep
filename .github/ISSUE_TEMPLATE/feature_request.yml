@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a new behavior or an improvement.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening a feature request, please skim [CHANGELOG.md](https://github.com/Hoodas101/lidkeep/blob/main/CHANGELOG.md) and open issues — the same idea may already be tracked. If it is, leave a 👍 there instead so we can prioritize.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem you're trying to solve?
+      description: Frame it as a need, not a solution. "I need X because Y" is more useful than "Add a button that does Z."
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: How LidKeep handles this today, and why it falls short for you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: ideal
+    attributes:
+      label: Ideal behavior
+      description: What you'd want LidKeep to do — at the level of "I want the screen to follow the schedule I set in macOS" rather than "add a JSON field."
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Willingness to contribute
+      description: Optional. Would you file a PR? Test a beta? Just want the feature?
+      placeholder: |
+        I'm willing to test a build but not write Swift.

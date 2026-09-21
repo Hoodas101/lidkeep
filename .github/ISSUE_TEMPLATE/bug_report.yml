@@ -1,0 +1,97 @@
+name: Bug report
+description: Report something broken — a crash, a wrong behavior, a regression.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. A complete report makes it much easier to reproduce and fix.
+
+  - type: input
+    id: version
+    attributes:
+      label: LidKeep version
+      description: Output of `lidkeep version` — please include the full line (version + commit hash).
+      placeholder: "LidKeep 2.2.3 (commit xxxxxxx)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: power
+    attributes:
+      label: Power source when the bug happened
+      options:
+        - AC power (charging)
+        - Battery (discharging)
+        - Battery (charged)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: macos
+    attributes:
+      label: macOS version
+      options:
+        - macOS 13 Ventura
+        - macOS 14 Sonoma
+        - macOS 15 Sequoia
+        - macOS 26 Tahoe
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - Apple Silicon (M1/M2/M3/M4)
+        - Intel
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw. Include the exact text of any error or dialog.
+      placeholder: |
+        I expected the screen to stay awake while lid is closed and I'm on AC power, but the machine goes to sleep after a few seconds.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What I expected
+      description: What you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The minimal sequence to reach the bug. Numbered list, please.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: `lidkeep doctor` output (if relevant)
+      description: Paste the full output if it's about anti-sleep / lid-closed / display control.
+      render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: From `~/Library/Application Support/LidKeep/LidKeep.log`. Include 5–10 lines around the bug if you can.
+      render: shell

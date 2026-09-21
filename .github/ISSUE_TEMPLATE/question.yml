@@ -1,0 +1,28 @@
+name: Question / help
+description: Ask how to do something, or report unusual behavior you can't reproduce.
+title: "[question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For "how do I…?" questions and one-off issues that aren't reproducible bugs. If you can clearly reproduce, please file a bug report instead.
+
+  - type: textarea
+    id: ask
+    attributes:
+      label: What you want to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you've already tried
+      description: Commands, settings, docs you read. This avoids "did you try X?" back-and-forth.
+
+  - type: input
+    id: version
+    attributes:
+      label: LidKeep version (`lidkeep version`)
+      placeholder: "LidKeep 2.2.3 (commit xxxxxxx)"
