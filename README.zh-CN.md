@@ -1,10 +1,12 @@
-<img src="docs/icon.png" width="112" align="right" alt="LidKeep app icon">
+<img src="docs/icon.png" width="112" align="right" alt="LidKeep app icon" style="margin-left:36px;margin-bottom:16px;">
 
 # LidKeep
 
 **关掉屏幕，但别让 Mac 睡。**
 
 屏幕一黑，机器照常跑：远程桌面还在线、下载还在、构建还在。按一下热键（或在 SSH 里敲一条命令），画面立刻回来。
+
+和真正的显示器睡眠不同 —— LidKeep 只是把背光关掉，显示器始终不睡眠，所以屏幕共享看到的始终是真实画面，而不是一片黑。
 
 [![Release](https://img.shields.io/github/v/release/Hoodas101/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#环境要求)
@@ -13,9 +15,25 @@
 
 English: [README.md](README.md) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全](SECURITY.md)
 
-**一行装好 LidKeep：**
+## 目录
+
+- [你遇到过吗](#你遇到过吗)
+- [和别的方案比](#和别的方案比)
+- [菜单里就两件事](#菜单里就两件事)
+- [三种常见用法](#三种常见用法)
+- [安装](#安装)
+- [使用](#使用)
+- [合盖 / 电池 / 无显示器时不睡眠](#合盖--电池--无显示器时不睡眠)
+- [原理](#原理)
+- [界面语言](#界面语言)
+- [还有这些细节](#还有这些细节)
+- [环境要求](#环境要求)
+- [常见问题](#常见问题)
+- [开发](#开发)
+- [打赏支持](#打赏支持)
 
 ```bash
+# 一行安装
 curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
 ```
 
@@ -23,6 +41,8 @@ curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remo
 $ lidkeep off      # 屏幕熄灭，系统继续跑
 $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 ```
+
+> **本地优先、隐私优先：** LidKeep 完全在你的 Mac 上运行 —— 无账号、无遥测，除了一次可选的 24 小时更新检查（只读取一个公开版本号）之外不发起任何网络请求。MIT 许可、零第三方依赖、完全开源，每次推送都有 CI 构建。
 
 ## 你遇到过吗
 
@@ -125,7 +145,7 @@ gh attestation verify lidkeep-macos.zip -R Hoodas101/lidkeep   # 验证构建来
 在 Release 链接前加 `https://gh-proxy.com/` 走镜像。已实测与官方产物**逐字节一致**（SHA-256 相符、长度完整），约 **173 KB/s**：
 
 ```bash
-V=2.2.2
+V=2.2.3
 curl -L -O "https://gh-proxy.com/https://github.com/Hoodas101/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # 必须与 Release 的 SHA256SUMS 一致
 ```
@@ -252,6 +272,12 @@ sudo lidkeep nosleep uninstall-helper  # 卸载（先复位再删除）
 **环境光自动亮度会干扰黑屏吗？** 不会。程序每 0.5 秒重设亮度 0，环境光压不住。
 
 **为什么不用 `pmset displaysleepnow`？** 真正的显示器睡眠会拆掉帧缓冲，远程端根本看不到画面；而且很多 App（浏览器、Electron）持有 `NoDisplaySleepAssertion`，根本进不了显示器睡眠。亮度归零在任何情况下都有效，且是唯一保持远程画面可用的方法。
+
+**SSH 里能用吗？锁屏后还生效吗？** 能。CLI（`lidkeep off/on/status`）可在 SSH 里执行；而锁屏（⌃⌘Q）和显示器的亮度状态是两回事 —— 无论屏是否锁着，黑屏与防睡眠都会照常工作。
+
+**无内置显示器的 Mac（如 Mac mini）呢？** 没有背光可关，黑屏无从谈起；但 `lidkeep nosleep` 依然能让机器保持唤醒，供远程访问与下载使用 —— 这通常正是无头 Mac 的需求。
+
+**会和专注模式 / 勿扰 / 夜览冲突吗？** 不会 —— 这些是彼此独立的子系统。黑屏只做两件事：把亮度设为 0、持有一个 `caffeinate` 断言；它不碰通知、专注或色彩设置。
 
 ## 卸载
 

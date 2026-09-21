@@ -1,10 +1,12 @@
-<img src="docs/icon.png" width="100" align="right" alt="LidKeep app icon">
+<img src="docs/icon.png" width="100" align="right" alt="LidKeep app icon" style="margin-left:36px;margin-bottom:16px;">
 
 # LidKeep
 
 **Turn the display off. Don't let the Mac sleep.**
 
 The screen goes pitch black; the machine keeps working. Remote desktop stays connected, downloads keep going, builds keep running. Press a hotkey (or run one command over SSH) and the picture comes straight back.
+
+Unlike true display sleep, LidKeep only cuts the backlight — the display never sleeps, so screen sharing keeps showing the real picture instead of a black frame.
 
 [![Release](https://img.shields.io/github/v/release/Hoodas101/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
@@ -13,9 +15,25 @@ The screen goes pitch black; the machine keeps working. Remote desktop stays con
 
 中文: [README.zh-CN.md](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-**Get LidKeep (one line):**
+## Contents
+
+- [Sound familiar?](#sound-familiar)
+- [How it compares](#how-it-compares)
+- [Two menu items & power plans](#there-are-only-two-menu-items)
+- [Three ways people actually use it](#three-ways-people-actually-use-it)
+- [Install](#install)
+- [Usage](#usage)
+- [Anti-sleep (closed lid / battery / headless)](#anti-sleep-closed-lid--battery--headless)
+- [How it works](#how-it-works)
+- [Language](#language)
+- [Details worth knowing](#details-worth-knowing)
+- [Requirements](#requirements)
+- [FAQ](#faq)
+- [Development](#development)
+- [Support](#support)
 
 ```bash
+# Install in one line
 curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
 ```
 
@@ -23,6 +41,8 @@ curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remo
 $ lidkeep off      # screen goes black, system keeps running
 $ lidkeep on       # display restored (also works over SSH)
 ```
+
+> **Local-first and private:** LidKeep runs fully on your Mac — no account, no telemetry, no network calls except an optional 24-hour update check that only reads a public version number. MIT-licensed, zero third-party dependencies, fully open source, with a CI build on every push.
 
 ## Sound familiar?
 
@@ -125,7 +145,7 @@ gh attestation verify lidkeep-macos.zip -R Hoodas101/lidkeep   # built by this r
 Prefix a release URL with `https://gh-proxy.com/` to route the download through a mirror. This was verified byte-identical to the official artifact (matching SHA-256, full length) at roughly **173 KB/s**:
 
 ```bash
-V=2.2.2
+V=2.2.3
 curl -L -O "https://gh-proxy.com/https://github.com/Hoodas101/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # must match SHA256SUMS from the release
 ```
@@ -250,6 +270,12 @@ To switch it temporarily or permanently: `LIDKEEP_LANG=zh lidkeep doctor` (`zh` 
 **Does an auto-brightness sensor fight the blackout?** The app re-asserts brightness 0 twice a second, so ambient-light changes won't light the screen up.
 
 **Why not just `pmset displaysleepnow`?** True display sleep tears down the framebuffer — remote viewers get nothing. Many apps (browsers, Electron apps) also hold `NoDisplaySleepAssertion`, which blocks display sleep entirely. Brightness-zeroing works everywhere and is the only method that keeps remote frames flowing.
+
+**Does it work over SSH, or when the screen is locked?** Yes. The CLI (`lidkeep off/on/status`) runs over SSH, and locking the screen (⌃⌘Q) is separate from the display's brightness state — blackout and anti-sleep keep working whether the screen is locked or not.
+
+**Headless Mac (Mac mini with no built-in display)?** There's no backlight to cut, so blackout has nothing to do; but `lidkeep nosleep` still keeps the machine awake for remote access and downloads, which is the usual reason to run one headless.
+
+**Does it clash with Focus, Do Not Disturb, or Night Shift?** No — those are unrelated subsystems. Blackout only sets brightness to 0 and holds a `caffeinate` assertion; it never touches notification, focus, or color settings.
 
 ## Uninstall
 
