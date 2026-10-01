@@ -112,7 +112,7 @@ func activePlan(_ c: Config) -> PowerPlan { onBatteryNow() ? c.planBattery : c.p
 func planStatusTitle(_ plan: PowerPlan, battery: Bool) -> String {
     // 连写规则中英不同：中文「状态：电源保持唤醒」可以直连，
     // 英文直连会连成 "Status: PowerKeep awake"，必须留分隔。
-    let sep = L10n.isEN ? " · " : ""
+    let sep = L10n.needsWordSeparator ? " · " : ""
     return L("状态：") + (battery ? L("电池") : L("电源")) + sep + plan.summary
 }
 
@@ -286,8 +286,12 @@ final class ScreenController {
     /// 注意落盘方式：中途要 spawn CLI 进程（约 1 秒），所以**不能**在开头 loadConfig()
     /// 再在末尾把那份快照写回去——这一秒里 CLI 对方案的改动会被整份抹掉（真踩过）。
     /// 判断所需的值（电量下限等）在开头读一次即可，落盘统一走 updateConfig 在动作后重读。
+    ///
+    /// `persist = false` 供过热保护使用：停掉守护但**不改配置** —— 热量是瞬时状态，
+    /// 降温后方案要能原样生效；若照电量那条路径把 `lidAwake` 写成 false，
+    /// 一次编译过热就会永久抹掉用户设的「合盖时 保持唤醒」。
     @discardableResult
-    func setLidAwake(_ on: Bool) -> Bool {
+    func setLidAwake(_ on: Bool, persist: Bool = true) -> Bool {
         let snapshot = loadConfig()
         guard let cli = fm.isExecutableFile(atPath: cliPath) ? cliPath : nil else {
             blog("bar: 合盖模式需要命令行工具")
@@ -296,6 +300,10 @@ final class ScreenController {
         if on {
             guard helperInstalled() else {
                 blog("bar: 合盖模式需要提权助手（覆盖合盖睡眠必须 root）")
+                return false
+            }
+            if thermalBlocksStart() {
+                blog("bar: 设备过热（critical），暂不能开启合盖模式")
                 return false
             }
             if batteryBlocksStart(snapshot) {
@@ -324,17 +332,20 @@ final class ScreenController {
                 return false
             }
             // 到这里进程动作已结束，才重读并只改自己这一个字段
-            updateConfig { $0.lidAwake = true }
+            if persist { updateConfig { $0.lidAwake = true } }
             cfg = loadConfig()
             blog("bar: 合盖不睡眠已开启 pid=\(lidDaemonPid() ?? 0)")
         } else {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: cli)
-            p.arguments = ["nosleep", "off"]
+            // `persist: false` 只保证**本进程**不写盘；这里 spawn 出去的 `nosleep off`
+            // 默认会把持久标志一起清掉，等于把 persist 参数架空。必须把意图透传给子进程，
+            // 否则过热保护「不动配置」的承诺会被自己的子进程破坏（实测踩到）。
+            p.arguments = ["nosleep", "off"] + (persist ? [] : ["--no-persist"])
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
             p.standardInput = FileHandle.nullDevice
             do { try p.run(); p.waitUntilExit() } catch { blog("bar: 停止合盖守护失败 \(error)") }
-            updateConfig { $0.lidAwake = false }
+            if persist { updateConfig { $0.lidAwake = false } }
             cfg = loadConfig()
             blog("bar: 合盖不睡眠已关闭")
         }
@@ -361,6 +372,10 @@ final class ScreenController {
         let running = lidDaemonPid() != nil
         if want {
             if running { return true }
+            // 过热期间不拉起。必须挡在这里而不是只挡 setLidAwake：
+            // 否则失败会被记成「电量/助手」原因并写入退避窗口，
+            // 用户插上电、装好助手之后仍要干等一个莫名其妙的 1~10 分钟。
+            if thermalBlocksStart() { return false }
             if let t = lidRetryAfter, Date() < t, !force { return false }   // 退避中，不反复重试
             let ok = setLidAwake(true)
             if ok {
@@ -462,6 +477,11 @@ final class ScreenController {
     @discardableResult
     func startNosleep(auto: Bool = false) -> Bool {
         guard !nosleepOn else { return true }
+        // 过热同样强制生效：防睡眠是四条耗电路径里最容易把热量困在包里的一条
+        // （合盖 + 不睡 = 散热口被盖住还在满负荷跑），所以排在电量之前先拦。
+        if thermalBlocksStart() {
+            return reject(L("设备过热：已暂停防睡眠以免持续升温；降温后自动恢复"))
+        }
         // 电量下限对防睡眠同样强制生效：合盖 + 电池 + 不睡是最容易耗尽电量的组合，
         // 机器在包里一直跑到没电，用户却毫不知情。
         if batteryBlocksStart(cfg) {
@@ -517,6 +537,13 @@ final class ScreenController {
 
     func startKeepDisplayOn() {
         guard displayCaff == nil else { return }
+        // 过热拦截：屏幕常亮本身就在发热，机器已经在降频时不该再压它。
+        // 只记日志、不弹通知 —— 与下面电量那条同一取舍（本函数会被周期对齐反复调用）。
+        if thermalBlocksStart() {
+            blog("bar: 设备过热（critical），暂不开启「保持屏幕常亮」")
+            onStateChange?()
+            return
+        }
         // 电量下限对「保持屏幕常亮」同样强制生效。它是本程序里唯一「屏幕整夜亮着」的
         // 形态，也是耗电最快的一条 —— 低于下限还去开，等于把「包里放电到关机」铺平。
         // 与另外三条耗电路径（关屏 / 防睡眠 / 息屏后保持唤醒）保持同一套拦截。
@@ -567,6 +594,13 @@ final class ScreenController {
         guard keepCaff == nil else { return true }
         // 黑屏联动的 -dis 已经覆盖系统睡眠，再叠一条纯属多一个进程
         guard !nosleepOn else { return true }
+        if thermalBlocksStart() {
+            let m = L("设备过热：已暂停防睡眠以免持续升温；降温后自动恢复")
+            blog("bar: \(m)")
+            if notifyOnBlock { notifyUser(m) }
+            onStateChange?()
+            return false
+        }
         if batteryBlocksStart(cfg) {
             let b = batteryStatus()
             let m = (L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)"
@@ -628,6 +662,10 @@ final class ScreenController {
         restoreRetry?.invalidate(); restoreRetry = nil
         guard dsAvailable else {
             return reject(L("亮度接口不可用（DisplayServices 缺失），无法关屏"))
+        }
+        // 关屏总是伴随一条阻止显示器睡眠的断言，机器在降频时再压它没有意义
+        if thermalBlocksStart() {
+            return reject(L("设备过热：已暂停防睡眠以免持续升温；降温后自动恢复"))
         }
         // 电量下限：黑屏 + 阻止睡眠的组合让人最容易忘记，耗尽电池会带走未保存的工作
         if batteryBlocksStart(cfg) {
@@ -717,6 +755,98 @@ final class ScreenController {
         }
         RunLoop.main.add(t, forMode: .common)
         battTimer = t
+    }
+
+    // MARK: 过热保护（分级：serious 只提醒，critical 才放手）
+    //
+    // 与电量守卫的关键差别：电量是**配置驱动**的持久状态（下限写在配置里，触底要改方案），
+    // 热量是**实时**状态 —— 降温就该自动恢复。因此这里刻意**不写任何配置**：
+    // 只停断言与守护，方案原样保留，靠 thermalBlocksStart() 挡住重新拉起。
+    // 若照搬电量那条「清方案」的路径，一次编译过热就会永久抹掉用户设的合盖运行。
+    //
+    // 分级而不是一律放手：Mac 在高负载下进入 serious 很常见，一热就停会频繁打断
+    // 用户本想跑完的长任务；critical 才意味着系统已在重度降频、再撑下去是硬损伤。
+    //
+    // 读的是 ProcessInfo.thermalState —— 公开 API、无需任何授权，与项目「读事实走无权限通道」
+    // 一致；也不用 powermetrics / pmset -g therm（前者要 root，后者要 spawn 进程）。
+    var thermalTimer: Timer?
+    private var thermalWarned = false      // 本轮 serious 已提醒过
+    /// 热保护当前是否处于「已放手」状态。**必须与提醒锁分开**：
+    /// 放手之后所有断言都停了，`drainingActive` 随之变成 false —— 若拿提醒锁兼职判断
+    /// 「要不要恢复」，那个早退分支会把锁重置掉，于是永远等不到恢复（写完第一版实测踩到）。
+    /// 这个标志只在温度真的回落到 nominal/fair 时才清除。
+    private var thermalHeld = false
+
+    /// 此刻是否有「正在耗电」的形态需要热守卫照看（与电量守卫同一集合）
+    private var drainingActive: Bool {
+        blacked || nosleepOn || lidOn || keepCaff != nil || displayCaff != nil
+    }
+
+    /// 常驻 30s 心跳。与电量守卫分开两条 Timer，而不是塞进同一个闭包：
+    /// 电量守卫在 `batteryFloor == 0` 时整个不创建（用户关掉电量保护就零开销），
+    /// 而热保护没有开关、必须常驻 —— 共用一个 Timer 会让「关掉电量保护」顺带关掉热保护。
+    func scheduleThermalGuard() {
+        thermalTimer?.invalidate()
+        let t = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.checkThermal()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        thermalTimer = t
+    }
+
+    private func checkThermal() {
+        let hot = thermalStateNow()
+        if hot == .serious || hot == .critical {
+            // 没有断言在跑时，热不热都不该由我们插手
+            guard drainingActive else { thermalWarned = false; return }
+            if hot == .serious {
+                guard !thermalWarned, !thermalHeld else { return }
+                thermalWarned = true
+                blog("bar: 设备温度偏高（serious），保持现状并提醒用户")
+                notifyUser(L("设备温度偏高（系统已开始降频）：仍保持防睡眠；若升到 critical 将自动暂停"))
+            } else {
+                guard !thermalHeld else { return }
+                thermalHeld = true
+                notifyUser(L("设备过热：已暂停防睡眠与关屏以免持续升温；降温后自动恢复，方案设置未改动"))
+                releaseForThermal(L("设备过热"))
+            }
+            return
+        }
+        // 降温（nominal / fair）：无条件解除封锁并把被挡住的形态装回来。
+        // ⚠️ 这里**不能**加 `guard drainingActive` —— 刚被 critical 放完手的那一刻
+        // 恰恰是所有断言都停、drainingActive 为 false 的状态，早退就等于永远不恢复。
+        // 合盖守护不必在这里动手，patrolLidDaemon 的 15s 巡检会自己补上。
+        thermalWarned = false
+        guard thermalHeld else { return }
+        thermalHeld = false
+        blog("bar: 设备温度已回落，按方案恢复生效")
+        syncKeepAwake()
+        syncKeepDisplayOn()
+        onStateChange?()
+    }
+
+    /// 过热 critical：放掉全部耗电形态，让机器能降频、能睡、能散热。
+    /// **不动配置** —— 见本节顶部注释；这也是它与 releaseForBattery 的唯一实质差别。
+    func releaseForThermal(_ reason: String) {
+        blog("bar: \(reason) —— 过热保护触发，暂停全部防睡眠与常亮（配置保留，降温后自动恢复）")
+        if blacked { restore() }
+        stopNosleep(reason)
+        // 「息屏后保持唤醒」的 -is 断言**必须显式停**：
+        // 后面那句 syncKeepAwake() 停不掉它 —— startKeepAwakeAssertion() 开头就是
+        // `guard keepCaff == nil else { return true }`，断言已经持有时会直接早退。
+        // 漏了这一句，热保护看着触发了（日志、通知都在），机器却仍被 caffeinate -is
+        // 挡着不能睡，等于什么都没做（实测踩到：critical 注入后 -is 进程依然存活）。
+        stopKeepAwakeAssertion()
+        stopKeepDisplayOn()
+        // 合盖守护是独立进程，必须显式停掉才会真正放开 disablesleep；
+        // persist: false 保证方案不被抹掉。
+        // 条件用 cfg.lidAwake 而非「守护在不在」，与 releaseForBattery 同一套归属语义：
+        // 用户手动 `lidkeep nosleep on --system` 起的守护不归方案管，不该被热保护误杀。
+        if cfg.lidAwake { _ = setLidAwake(false, persist: false) }
+        cfg = loadConfig()
+        syncKeepAwake()          // thermalBlocksStart() 会挡住重新装回
+        syncKeepDisplayOn()
+        onStateChange?()
     }
 
     func restore() {
@@ -899,6 +1029,10 @@ final class ScreenController {
         // 机器在包里一路放电到关机，而用户以为下限在保护他（实测踩过）。
         // 守卫自身每 30s 检查 blacked/nosleepOn/lidOn，都没有时直接返回，常驻无成本。
         scheduleBatteryGuard()
+        // 热守卫与电量守卫同理必须在启动时就位：合盖守护是独立进程，App 重启带不走它，
+        // 启动时它可能已经在跑 —— 那条路径上没有守卫的话，机器在包里持续升温就没人管。
+        // 与电量守卫不同，它没有开关、无条件常驻（闲置时每 30s 一次闭包调用，成本可忽略）。
+        scheduleThermalGuard()
 
         // 指令走命令文件：SIGUSR1/USR2 必须显式忽略（默认行为是终止进程），
         // 真正的开关动作由下方 Timer 轮询 command 文件完成
@@ -1086,6 +1220,43 @@ func batteryBlocksStart(_ c: Config) -> Bool {
     if BatteryAction(rawValue: c.batteryAction) ?? .restoreOnly == .notifyOnly { return false }
     let b = batteryStatus()
     return b.onBattery && b.discharging && b.percent <= c.batteryFloor
+}
+
+// MARK: - 过热保护
+
+/// 热状态仿真钩子（仅测试用）。内容同 `LK_SIMULATE_THERMAL`：`nominal|fair|serious|critical`。
+///
+/// 为什么必须是**文件**而不是只认环境变量：热守卫是 30s 心跳，测试要在 App 已经跑起来
+/// 之后把状态从 nominal 改成 critical，而环境变量在进程启动那一刻就定死了，改不了。
+/// （与 `_sim-battery` 需要文件形式是同一个理由。）
+///
+/// 为什么非要有这个口子：热状态没法像电量那样真的构造出来，而本项目对守卫的硬纪律是
+/// 「任何判据都要能被构造出失败」—— 没有仿真钩子，热守卫的测试就只能是永远为绿的空断言，
+/// 那比没有测试更糟（详见 2026-09-16 的假绿灯自查记录）。
+let simThermalFile = base + "/_sim-thermal"
+
+func thermalStateNow() -> ProcessInfo.ThermalState {
+    let raw = (try? String(contentsOfFile: simThermalFile, encoding: .utf8))
+        ?? ProcessInfo.processInfo.environment["LK_SIMULATE_THERMAL"]
+    switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "critical": return .critical
+    case "serious":  return .serious
+    case "fair":     return .fair
+    case "nominal":  return .nominal
+    default:         return ProcessInfo.processInfo.thermalState
+    }
+}
+
+/// 过热时是否该拒绝开启新的耗电动作（防睡眠 / 关屏 / 合盖运行 / 屏幕常亮）。
+///
+/// 与 `batteryBlocksStart` 同形，但读的是**实时**状态而不是配置 —— 这一点决定了
+/// 热保护的恢复方式：降温后这个函数自己就变回 false，被挡住的形态由周期巡检自动装回来，
+/// 不需要（也不应该）去改任何配置。
+///
+/// 阈值取 critical 而不是 serious：serious 在高负载下很常见，一热就拦会频繁打断
+/// 用户本想跑完的长任务；critical 才意味着系统已重度降频、再撑是硬损伤。
+func thermalBlocksStart() -> Bool {
+    thermalStateNow() == .critical
 }
 
 // MARK: - 热键录入控件
@@ -2486,7 +2657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let a = NSAlert(); a.alertStyle = .warning
         a.messageText = L("快捷键未生效")
         let hotkeyHelp: String
-        if L10n.isEN {
+        if !L10n.isChinese {
             hotkeyHelp = """
             \(hotkeyText(ctl.cfg)): \(carbonStatusText(ctl.lastHotkeyStatus))
 

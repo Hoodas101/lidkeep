@@ -82,8 +82,12 @@ endef
 #
 # 共享文件列表只写这一处：两个 target 必须编译同一份，漏掉一个就会退化成
 # 「另一端缺符号」或更糟的「两端各有一份实现互相漂移」。
-SHARED := Sources/Shared/Version.swift Sources/Shared/L10n.swift Sources/Shared/Config.swift \
-          Sources/Shared/PowerPlan.swift Sources/Shared/SystemState.swift Sources/Shared/Ownership.swift
+#
+# 文案表用 wildcard 收：加一门语言只需把 L10nXX.swift 丢进 Sources/Shared/，
+# 不必再回来改这里 —— 少一处要同步的地方，就少一类「加了语言却漏加进构建」的错。
+SHARED := Sources/Shared/Version.swift $(wildcard Sources/Shared/L10n*.swift) \
+          Sources/Shared/Config.swift Sources/Shared/PowerPlan.swift \
+          Sources/Shared/SystemState.swift Sources/Shared/Ownership.swift
 cli: version-file
 	$(call compile-universal,Sources/CLI/main.swift $(SHARED),lidkeep,build/lidkeep)
 

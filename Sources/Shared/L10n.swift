@@ -1,612 +1,120 @@
 import Foundation
 
-// MARK: - 本地化
+// MARK: - 本地化（多语言）
 //
-// 界面语言跟随系统：系统语言为中文 → 中文界面，其余（含英文）→ 英文界面。
+// 界面语言跟随系统，可用 LIDKEEP_LANG 或 config.json 的 lang 字段覆盖。
 // 覆盖顺序（前者优先）：
-//   1. 环境变量 LIDKEEP_LANG=zh|en
-//   2. config.json 里的 lang 字段：auto / zh / en
+//   1. 环境变量 LIDKEEP_LANG=zh|en|ja|ko|de|fr|es
+//   2. config.json 里的 lang 字段：auto / 上述任一语言代码
 //   3. 系统首选语言（AppleLanguages）
 //
 // 为什么不用 Bundle 本地化：CLI 与菜单栏 App 共用同一批字符串，而 CLI 不是 bundle，
 // 拿不到 .lproj 资源；用代码表可以让两个 target 共用一份文案，且不会漏翻。
+//
+// 表按语言拆成独立文件（L10nEN / L10nJA / …），key 统一是源码里的**中文原文**。
+// 这个约定有两个好处：调用点写成 L("关闭显示器") 仍然一眼能读；漏翻时 L() 能按
+// 当前语言 → 英文 → 中文 三级降级，永远退得到有内容的东西，而不会出现空白或 key 泄漏。
 
 enum L10n {
-    /// 当前语言："zh" 或 "en"。惰性求值一次，之后不再变。
+    /// 支持的语言代码。新增语言要动两处：这里，以及加一份 L10nXX.swift
+    /// （构建侧用 wildcard 收 Sources/Shared/L10n*.swift，不用改 Makefile）。
+    static let supported = ["zh", "en", "ja", "ko", "de", "fr", "es"]
+
+    /// 当前语言。惰性求值一次，之后不再变。
     static let lang: String = {
-        if let v = ProcessInfo.processInfo.environment["LIDKEEP_LANG"]?.lowercased(),
-           !v.isEmpty {
-            if v.hasPrefix("zh") { return "zh" }
-            if v.hasPrefix("en") { return "en" }
+        if let v = ProcessInfo.processInfo.environment["LIDKEEP_LANG"], let m = normalize(v) {
+            return m
         }
-        if let v = configuredLang(), v == "zh" || v == "en" { return v }
-        return systemPrefersChinese() ? "zh" : "en"
+        if let v = configuredLang(), let m = normalize(v) { return m }
+        return systemPreferred() ?? "en"
     }()
 
-    static var isEN: Bool { lang == "en" }
+    /// 界面语言是否为中文。给「只有中/英两套」的长帮助文本用（那些是多行字面量，
+    /// 不走文案表）。判据必须是 isChinese 而不是 isEN —— 若写成「是英文吗」，
+    /// 日语、德语用户会被判进 else 分支拿到**中文**帮助，比拿到英文更糟。
+    static var isChinese: Bool { lang == "zh" }
 
-    /// 读 config.json 的 lang 字段（不依赖 Config 结构，避免初始化循环）
+    /// 拼接短句时要不要留分隔符。
+    /// 中/日/韩可以直连（「状态：电源保持唤醒」），拉丁字母语言必须留，
+    /// 否则会连成 "Status: PowerKeep awake"。
+    static var needsWordSeparator: Bool { !["zh", "ja", "ko"].contains(lang) }
+
+    /// 语言代码的显示名（用当前界面语言书写）。CLI 的 `config` 回显与设置面板共用。
+    /// 代码 → 名字的映射只有这一处，免得 CLI 与 App 各拼一套、加语言时漏改一边。
+    static func displayName(_ code: String) -> String {
+        switch code {
+        case "auto": return L("跟随系统")
+        case "zh":   return L("中文")
+        case "en":   return L("英文")
+        case "ja":   return L("日文")
+        case "ko":   return L("韩文")
+        case "de":   return L("德文")
+        case "fr":   return L("法文")
+        case "es":   return L("西班牙文")
+        default:     return code
+        }
+    }
+
+    /// 可选的 --lang 取值清单，供帮助文本与错误提示复用
+    static var langList: String { "auto/" + supported.joined(separator: "/") }
+
+    /// 把任意语言标签归一化成支持列表里的一个；不支持则返回 nil。
+    /// 例：zh-Hans / zh_CN → zh，en-GB → en，ja-JP → ja，nl-NL → nil。
+    static func normalize(_ raw: String) -> String? {
+        let s = raw.lowercased().replacingOccurrences(of: "_", with: "-")
+        guard !s.isEmpty else { return nil }
+        // 中文先判：zh-Hans / zh-Hant / zh-CN 都归到同一套简体界面
+        if s.hasPrefix("zh") { return "zh" }
+        for code in supported where code != "zh" {
+            if s == code || s.hasPrefix(code + "-") { return code }
+        }
+        return nil
+    }
+
+    /// 读 config.json 的 lang 字段（不依赖 Config 结构，避免初始化循环）。
+    /// 返回 nil = auto 或取值不认识 → 交给系统语言。
     private static func configuredLang() -> String? {
         let p = NSHomeDirectory() + "/Library/Application Support/LidKeep/config.json"
         guard let d = FileManager.default.contents(atPath: p),
               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let s = o["lang"] as? String else { return nil }
-        let v = s.lowercased()
-        if v.hasPrefix("zh") { return "zh" }
-        if v.hasPrefix("en") { return "en" }
-        return nil   // auto：交给系统语言
+        return s.lowercased() == "auto" ? nil : normalize(s)
     }
 
-    /// 系统首选语言是否为中文。CLI 不是 bundle，读全局 AppleLanguages 更可靠。
+    /// 系统首选语言里第一个「我们支持的」。CLI 不是 bundle，读全局 AppleLanguages 更可靠。
     ///
-    /// 规则：取系统语言列表里第一个「我们支持的语言」——中文（zh/Hans/Hant）→ 中文界面，
-    /// 英文（en）→ 英文界面。整份列表都不含中/英时（日语、法语系统等）默认英文：
-    /// 此时**不能**再退回 Locale.current，否则中国区域码会把非中文系统误判成中文界面
-    /// （实测：模拟系统语言 ja 时曾输出中文）。
-    private static func systemPrefersChinese() -> Bool {
+    /// 整份列表都不在支持列表里时返回 nil（调用方默认英文）：此时**不能**再退回
+    /// Locale.current，否则中国区域码会把荷兰语、瑞典语等系统误判成中文界面
+    /// （实测踩过：模拟系统语言 ja 时输出过中文）。
+    private static func systemPreferred() -> String? {
         var list: [String] = []
         if let v = CFPreferencesCopyAppValue("AppleLanguages" as CFString,
                                              kCFPreferencesAnyApplication) as? [String] {
             list = v
         }
         if list.isEmpty { list = Locale.preferredLanguages }
-        for l in list {
-            let s = l.lowercased().replacingOccurrences(of: "_", with: "-")
-            if s.hasPrefix("zh") || s.contains("hans") || s.contains("hant") { return true }
-            if s.hasPrefix("en") { return false }
-        }
-        if !list.isEmpty { return false }   // 系统语言既非中文也非英文 → 英文界面
+        for l in list { if let m = normalize(l) { return m } }
+        if !list.isEmpty { return nil }
         // 只有连语言列表都拿不到（极少数 CLI 环境）才退回区域语言
-        if let code = Locale.current.language.languageCode?.identifier, code.hasPrefix("zh") {
-            return true
-        }
-        return false
+        if let code = Locale.current.language.languageCode?.identifier { return normalize(code) }
+        return nil
     }
 }
 
-/// 取本地化文案。表内没有的条目原样返回（中文），
-/// 这样即使漏翻也不会出现空白界面 —— 漏翻只是没翻译，不会崩。
+/// 取本地化文案。查找顺序：**当前语言 → 英文 → 中文原文**。
+///
+/// 三级降级是刻意的：漏翻只会退成英文（既不是空白，也不是中文 key），
+/// 所以「翻译不全」永远弄不坏界面，只会少一点本地化 —— 这正是新增语言时
+/// 可以分批补译、而不必一次到位的依据。
 func L(_ zh: String) -> String {
-    guard L10n.isEN else { return zh }
-    return L10nTable[zh] ?? zh
+    switch L10n.lang {
+    case "zh": return zh
+    case "ja": if let v = L10nJA[zh] { return v }
+    case "ko": if let v = L10nKO[zh] { return v }
+    case "de": if let v = L10nDE[zh] { return v }
+    case "fr": if let v = L10nFR[zh] { return v }
+    case "es": if let v = L10nES[zh] { return v }
+    default: break
+    }
+    return L10nEN[zh] ?? zh
 }
-
-/// 中 → 英 文案表。key 必须是源码里的中文字面量（逐字一致，含空格与标点）。
-let L10nTable: [String: String] = [
-    "（未生效）": " (not active)",
-    "（合盖不睡未生效）": " (awake-with-lid-closed is not active)",
-    "（息屏保持唤醒未生效）": " (stay-awake after display sleep is not active)",
-    "（息屏唤醒未生效）": " (stay-awake not active)",
-    "（常亮未生效）": " (always-on display not active)",
-    "重试启用「合盖不睡」": "Retry \"awake with the lid closed\"",
-    "「合盖不睡」已生效。": "\"Awake with the lid closed\" is now active.",
-    "已按当前电源方案停止「合盖不睡」。如需长期保留，请把该方案的「合盖时」设为「保持唤醒」。": "Stopped \"awake with the lid closed\" to match the current power plan. To keep it on permanently, set \"When the lid closes\" to \"Keep awake\" in that plan.",
-    "开（守护运行中，重启后自动恢复）": "on (daemon running, restored after restart)",
-    "开（由手动防睡眠持有）": "on (held by a manual keep-awake)",
-    "未生效（配置要求合盖运行，但守护未启动 —— 打开菜单栏 App 即可恢复）": "not active (the plan asks for lid-closed running, but the daemon is not running — open the menu bar app to restore it)",
-    "切换运行方案": "switch power plan",
-    "（合盖不睡未生效，将在条件满足后自动重试）": " (awake-with-lid-closed is not active yet — it will retry automatically)",
-    "「合盖不睡」未能生效：需要提权助手，且电量需高于下限。详见「打开日志」。": "Could not enable \"awake with the lid closed\": it needs the privileged helper, and the battery must be above the floor. See the log.",
-    "「合盖不睡」未能生效：": "Could not enable \"awake with the lid closed\": ",
-    "睡眠": "Sleep",
-    "保持唤醒": "Keep awake",
-    "合盖后按系统设置正常睡眠": "Closing the lid sleeps the Mac as usual, per system settings",
-    "屏幕常亮": "Display always on",
-    "合盖不睡": "Awake when closed",
-    "不干预": "No intervention",
-    "、": ", ",
-    "接通电源": "On AC power",
-    "使用电池": "On battery",
-    "息屏后保持唤醒": "Stay awake after the display sleeps",
-    "合盖时": "When the lid closes",
-    "屏幕照常熄灭，但系统不睡 —— 息屏期间远程桌面仍能连上": "The screen still goes dark but the system stays awake — remote desktop keeps working",
-    "显示器不熄、系统也不睡；屏幕一直亮着，较耗电": "Neither the display nor the system sleeps; the screen stays lit and uses more power",
-    "接着电源时合盖常开，选「保持唤醒」即可。": "If you run lid-closed on AC power, pick \"Keep awake\".",
-    "用电池时建议保持「睡眠」，免得合上就在包里一直耗电。": "On battery, prefer \"Sleep\" so a closed Mac does not drain inside your bag.",
-    "接通电源时": "When plugged in",
-    "使用电池时": "When on battery",
-    "当前：": "Active: ",
-    "状态：": "Status: ",
-    "电源": "Power",
-    "电源方案：": "Power plan: ",
-    "按「接通电源 / 使用电池」分别设置，三项可同时开启": "Set it separately for AC power and battery; all three can be on at once",
-    "合盖时：": "When the lid closes: ",
-    "编辑另一套方案…": "Edit the other plan…",
-    " · ": " · ",
-    "  接通电源: ": "  On AC power: ",
-    "  使用电池: ": "  On battery: ",
-    "  当前生效: ": "  Currently active: ",
-    "  修改: lidkeep plan --ac --keep-awake on --lid nothing": "  Change: lidkeep plan --ac --keep-awake on --lid nothing",
-    "电源方案已保存: ": "Power plan saved: ",
-    "错误：--keep-awake 需要 on / off，收到: ": "Error: --keep-awake needs on / off, got: ",
-    "错误：--display-on 需要 on / off，收到: ": "Error: --display-on needs on / off, got: ",
-    "错误：--lid 需要 sleep（合盖睡眠）/ nothing（合盖不睡），收到: ": "Error: --lid needs sleep / nothing, got: ",
-    "切换电源方案": "power plan switched",
-    "「合盖时熄灭内屏」由合盖守护执行，因此需要先把某套方案里的「合盖时」设为「保持唤醒」；": "Lid blackout is done by the lid daemon, so first set \"When the lid closes\" to \"Keep awake\" in a plan; ",
-    "      一键安装：`lidkeep nosleep setup`（会弹系统密码框）": "      Install it in one command: `lidkeep nosleep setup` (shows a system password prompt)",
-    "      本次按 Level 1 开启——仅在接电源时有效。": "      Starting at Level 1 — effective on AC power only.",
-    "     → 一键安装：lidkeep nosleep setup": "     → Install it in one command: lidkeep nosleep setup",
-    "     → 启动菜单栏 App，或安装 CLI 常驻服务（lidkeep service install）": "     → Launch the menu bar app, or install the CLI resident service (lidkeep service install)",
-    "     → 执行 `lidkeep on` 恢复，或重启菜单栏 App 自动自愈": "     → Run `lidkeep on` to restore, or restart the menu bar app to self-heal",
-    "     → 重新安装：lidkeep nosleep install-helper --force（需输入一次密码）": "     → Reinstall it: lidkeep nosleep install-helper --force (requires your password once)",
-    "     防睡眠运行期间合盖会自动熄灭内屏，开盖自动恢复": "     While anti-sleep runs, closing the lid turns the built-in display off and opening it restores brightness",
-    "   ⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行": "   ⚠️ Post-install check failed (missing the owner-accounting field) — the install may not have taken effect, please run it again",
-    "   启动未确认，请查看 ": "   Startup not confirmed, see ",
-    "   安装失败: ": "   Installation failed: ",
-    "   完成（电池与合盖现已可防睡眠）": "   Done (battery and closed lid can now be kept awake)",
-    "   已开启 pid=": "   Enabled pid=",
-    "   提示：取消密码框会中止安装，可重新运行本命令。": "   Note: cancelling the password prompt aborts installation; just run this command again.",
-    "  /  lidkeep on  /  远程执行同一命令": "  /  lidkeep on  /  run the same command remotely",
-    "  CLI 常驻服务: ": "  CLI resident service: ",
-    "  ℹ️ 无本程序守护，但检测到远控软件 ": "  ℹ️ No daemon of ours, but remote-control app ",
-    "  ℹ️ 系统级开关由远控软件 ": "  ℹ️ The system-level switch is held by remote-control app ",
-    "  ⚠️  SMC 合盖检测不可用（台式机 / 虚拟机属正常；合盖熄屏功能将自动禁用）": "  ⚠️  SMC lid detection unavailable (normal on desktops and VMs; lid blackout is disabled automatically)",
-    "  ⚠️  service.pid 指向已不存在的进程（上次异常退出），下次启动会自动清理": "  ⚠️  service.pid points to a process that no longer exists (the last run quit unexpectedly); it will be cleaned up on the next launch",
-    "  ⚠️  两者同时注册会互相抢占状态，建议只保留菜单栏 App": "  ⚠️  Registering both makes them fight over state; keep only the menu bar app",
-    "  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠": "  ⚠️  Privileged helper not installed: anti-sleep only works on AC power; battery and closed lid still sleep",
-    "  ⚠️  提权助手版本过旧：缺少「多持有者记账」，关屏联动与手动防睡眠会互相关掉对方": "  ⚠️  Privileged helper is outdated: it lacks multi-owner accounting, so blanking-linked and manual anti-sleep turn each other off",
-    "  ⚠️  没有常驻进程：热键不可用，只能用 CLI 命令开关屏幕": "  ⚠️  No resident process: the hotkey is unavailable, use CLI commands to toggle the display",
-    "  ⚠️ SMC 合盖检测不可用，合盖自动熄屏已禁用（台式机/虚拟机属正常）": "  ⚠️ SMC lid detection unavailable, so automatic lid blackout is disabled (normal on desktops and VMs)",
-    "  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `lidkeep nosleep off` 复位": "  ⚠️ Leftover detected: no daemon is running but the system-level switch is still on — run `lidkeep nosleep off` to reset",
-    "  ✅ SMC 合盖检测可用（MSLD），当前：": "  ✅ SMC lid detection available (MSLD), currently: ",
-    "  ✅ 一次性黑屏 daemon pid=": "  ✅ One-shot blanking daemon pid=",
-    "  ✅ 亮度接口 DisplayServices 可用，当前亮度 ": "  ✅ DisplayServices brightness API available, current brightness ",
-    "  ✅ 常驻服务运行中 pid=": "  ✅ Resident service running pid=",
-    "  ✅ 提权助手已安装": "  ✅ Privileged helper installed",
-    "  ❌ brightness.state 存在但没有任何进程维持黑屏 —— 上次崩溃的残留，屏幕可能仍黑着": "  ❌ brightness.state exists but no process is keeping the display blank — leftover from a crash, the screen may still be black",
-    "  ❌ 亮度接口不可用：本 macOS 可能已移除该私有框架，关屏功能整体失效": "  ❌ Brightness API unavailable: this macOS may have removed that private framework, so blanking does not work at all",
-    "  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `lidkeep nosleep off` 复位": "  ❌ No daemon is running yet system-level anti-sleep is still on — run `lidkeep nosleep off` to reset",
-    "  ❌ 热键未带修饰键：系统不会注册，等于没有热键（lidkeep config --mods cmd,shift --key 0）": "  ❌ Hotkey has no modifier: macOS will not register it, so you effectively have no hotkey (lidkeep config --mods cmd,shift --key 0)",
-    "  一次性模式超时: ": "  One-shot mode timeout: ",
-    "  二进制: ": "  Binary: ",
-    "  修改: lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep": "  Change: lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep",
-    "  关屏联动防睡眠: ": "  Anti-sleep linked to blanking: ",
-    "  关闭: lidkeep nosleep off": "  Turn off: lidkeep nosleep off",
-    "  内屏: ": "  Built-in display: ",
-    "  合盖模式: ": "  Lid mode: ",
-    "  守护进程: 运行中 pid=": "  Daemon: running pid=",
-    "  层级: ": "  Level: ",
-    "  已持续: ": "  Running for: ",
-    "  开机自启，日志: ": "  Launches at login, log: ",
-    "  恢复亮度: ": "  Restore brightness: ",
-    "  提权助手: ": "  Privileged helper: ",
-    "  时长: ": "  Duration: ",
-    "  热键 ": "  Hotkey ",
-    "  热键 ⌃⌥⌘B 直接开关；也可用 lidkeep off / on": "  Hotkey ⌃⌥⌘B toggles directly; lidkeep off / on also work",
-    "  热键: ": "  Hotkey: ",
-    "  状态目录: ": "  State directory: ",
-    "  电源: ": "  Power: ",
-    "  电量下限: ": "  Battery floor: ",
-    "  系统级开关: ": "  System-level switch: ",
-    "  菜单栏 App: ": "  Menu bar app: ",
-    " 不支持软件亮度": " does not support software brightness",
-    " 不支持软件亮度控制（HDMI/DVI/DP 外接屏常见），关屏时这块屏不会熄灭": " does not support software brightness control (common with HDMI/DVI/DP monitors), so this screen stays lit while blanked",
-    " 个问题需要修复 —— ": " issue(s) to fix — ",
-    " 亮度 ": " brightness ",
-    " 分钟": " minutes",
-    " 原亮度=": " previous brightness=",
-    " 在运行": " running",
-    " 在运行——系统级开关由其持有以保持远程可用，属正常共存，无需处理": " is running — it holds the system-level switch to stay remotely reachable. That is normal coexistence, nothing to fix",
-    " 在运行，判定为其持有（保持远程可用），不复位": " is running, so it is treated as the holder (keeping remote access alive) — not resetting",
-    " 小时 ": " hours ",
-    " 小时，0 = 不限）": " hours, 0 = unlimited)",
-    " 层级=": " level=",
-    " 已不属于 lidkeep（pid 被复用），清理陈旧记录": " no longer belongs to lidkeep (pid reused), clearing the stale record",
-    " 当前亮度 ": " current brightness ",
-    " 待恢复亮度=": " brightness pending restore=",
-    " 投递给了本程序，可直接开关显示。": " to this app — it can toggle the display directly.",
-    " 持有（保持远程可用），与本程序共存，无需处理": " (keeping remote access alive) — it coexists with this tool, nothing to do",
-    " 秒": " seconds",
-    " 秒后自动停止": " seconds, then it stops automatically",
-    " 秒（": " seconds (",
-    " 项提示（不影响基本使用）": " notice(s) (basic use is unaffected)",
-    "% 低于下限 ": "% is below the floor ",
-    "% 已达下限 ": "% reached the floor ",
-    "%　关屏联动防睡眠 ": "%  anti-sleep linked to blanking ",
-    "%（电池供电且放电时，低于此值拒绝关屏并自动恢复）": "% (on battery while discharging, below this value blanking is refused and the display is restored)",
-    "%，已取消关屏（避免耗尽电池）": "%, blanking cancelled (to avoid draining the battery)",
-    "%，已取消开启防睡眠（避免耗尽电池）": "%, cancelled enabling anti-sleep (to avoid draining the battery)",
-    "%，已取消「息屏后保持唤醒」（避免耗尽电池）": "%, stay-awake-after-display-sleep cancelled (to avoid draining the battery)",
-    "%，已取消「保持屏幕常亮」（避免耗尽电池）": "%, always-on display cancelled (to avoid draining the battery)",
-    "%，自动停止防睡眠": "%, stopping anti-sleep automatically",
-    "%，自动恢复": "%, restoring automatically",
-    "%，自动恢复显示": "%, restoring the display automatically",
-    "%，跳过立即开启（黑屏联动在接电后仍会生效）": "%, skipping immediate activation (blanking linkage still applies once on AC power)",
-    ")，原亮度 ": "), previous brightness ",
-    ")，本实例退出\n": "), this instance is quitting\n",
-    ".plist\n\n或在系统设置的「登录项」里手动添加 ": ".plist\n\nOr add it manually under Login Items in System Settings ",
-    "1 小时": "1 hour",
-    "12 小时": "12 hours",
-    "2 小时": "2 hours",
-    "30 分钟": "30 minutes",
-    "4 小时": "4 hours",
-    "8 小时": "8 hours",
-    "LidKeep —— 快捷键 ": "LidKeep — hotkey ",
-    "LidKeep —— 快捷键未生效：": "LidKeep — hotkey not working: ",
-    "LidKeep —— 点击打开菜单": "LidKeep — click to open the menu",
-    "LidKeep 一键防睡眠": "LidKeep one-click anti-sleep",
-    "LidKeep 设置": "LidKeep Settings",
-    "LidKeep 诊断 —— v": "LidKeep diagnostics — v",
-    "DisplayServices 不可用": "DisplayServices unavailable",
-    "\n【关屏能力】": "\n[Blanking capability]",
-    "\n【合盖检测】": "\n[Lid detection]",
-    "\n【常驻进程】": "\n[Resident processes]",
-    "\n【开机自启】": "\n[Launch at login]",
-    "\n【配置】": "\n[Config]",
-    "\n【防睡眠】": "\n[Anti-sleep]",
-    "daemon 启动 pid=": "daemon started pid=",
-    "daemon.pid 中的 pid=": "pid in daemon.pid=",
-    "disablesleep 支持情况: ": "disablesleep support: ",
-    "disablesleep 残留": "Leftover disablesleep",
-    "lid: SMC 合盖检测已启用（当前：": "lid: SMC lid detection enabled (currently: ",
-    "lid: 守护退出，恢复内屏亮度 ": "lid: daemon exiting, restoring built-in brightness ",
-    "lid: 已合盖但内屏亮度设置失败（DisplayServices 不可用？），本机屏幕将继续点亮": "lid: lid closed but setting the built-in brightness failed (DisplayServices unavailable?) — the screen will stay lit",
-    "lid: 无法读取 SMC 合盖状态（台式机/虚拟机属正常），合盖熄屏已禁用": "lid: could not read the SMC lid state (normal on desktops and VMs) — lid blackout disabled",
-    "lid: 检测到合盖，内屏已熄灭（原亮度 ": "lid: lid closed, built-in display turned off (previous brightness ",
-    "lid: 检测到开盖，恢复内屏亮度 ": "lid: lid opened, restoring built-in brightness ",
-    "lid: 测试模式（LK_SIMULATE_LID_CLOSED=": "lid: test mode (LK_SIMULATE_LID_CLOSED=",
-    "lid: SMC 连接已重建（系统睡眠唤醒后连接会失效，已自动恢复）": "lid: SMC connection rebuilt (it lapses after sleep/wake; recovered automatically)",
-    "lid: SMC 读取失败且重连未成功，合盖熄屏暂时不可用": "lid: could not read the SMC and reconnecting failed — lid blackout is temporarily unavailable",
-    "lid: 系统已唤醒，重新检查合盖状态": "lid: system woke up, re-checking the lid state",
-    "lid: 错误：内屏亮度恢复失败，请手动调整亮度": "lid: error — could not restore the built-in brightness, please adjust it manually",
-    "lid: 错误：退出时内屏亮度恢复失败，请手动调整亮度": "lid: error — could not restore the built-in brightness on exit, please adjust it manually",
-    "macOS 会弹出密码框，请输入你的登录密码。": "macOS will show a password prompt — enter your login password.",
-    "nosleep 停止：": "nosleep stopped: ",
-    "nosleep 启动 pid=": "nosleep started pid=",
-    "nosleep: disablesleep 开启但无本程序守护；检测到远控软件 ": "nosleep: disablesleep is on but no daemon of ours is running; remote-control app ",
-    "nosleep: 关屏联动已开启系统级防睡眠（覆盖电池与合盖）": "nosleep: blanking linkage enabled system-level anti-sleep (covers battery and closed lid)",
-    "nosleep: 已复位 disablesleep=0": "nosleep: reset disablesleep=0",
-    "nosleep: 检测到 disablesleep 仍开启但无守护进程，已自动复位": "nosleep: disablesleep was still on with no daemon running — reset automatically",
-    "nosleep: 系统级防睡眠不可用，降级为 caffeinate（仅 AC 有效）": "nosleep: system-level anti-sleep unavailable, falling back to caffeinate (AC power only)",
-    "nosleep: 系统级防睡眠已开启（disablesleep=1），覆盖电池与合盖": "nosleep: system-level anti-sleep enabled (disablesleep=1), covering battery and closed lid",
-    "nosleep: 超时 ": "nosleep: timeout ",
-    "nosleep: 收掉遗留的守护进程 pid=": "nosleep: taking over a stale daemon pid=",
-    "nosleep: 守护 pid=": "nosleep: daemon pid=",
-    " 未响应停止指令，强制结束": " did not respond to the stop signal — forced to exit",
-    "另清理了 ": "also cleaned up ",
-    " 个遗留守护进程": " stale daemon process(es)",
-    "多个防睡眠守护并存": "multiple anti-sleep daemons are running",
-    "  ❌ 防睡眠守护有 ": "  ❌ there are ",
-    " 个实例在跑：": " anti-sleep daemon instances running: ",
-    "     它们各自持有防睡眠断言，`nosleep off` 只能关掉其中一个 —— 系统会一直不睡": "     each holds its own anti-sleep assertion, and `nosleep off` can only stop one of them — the Mac will never sleep",
-    "     → 一键清理：lidkeep nosleep off": "     → clean up in one go: lidkeep nosleep off",
-    "service 启动 pid=": "service started pid=",
-    "service 恢复显示 ": "service restored the display ",
-    "service 拒绝启动 pid=": "service refused to start pid=",
-    "service 进入黑屏，原亮度 ": "service blanked the display, previous brightness ",
-    "service.pid 中的 pid=": "pid in service.pid=",
-    "service.pid 陈旧": "Stale service.pid",
-    "s　": "s  ",
-    "s，电量下限 ": "s, battery floor ",
-    "s，自动恢复": "s, restoring automatically",
-    "→ 如确实要改用 CLI 服务，请先在菜单栏设置中关闭「登录时启动」。": "→ If you really want the CLI service instead, turn off \"Launch at Login\" in the menu bar settings first.",
-    "→ 建议：直接使用菜单栏 App，无需安装本 CLI 服务。": "→ Recommendation: just use the menu bar app; there is no need for this CLI service.",
-    "① 安装提权助手（macOS 将弹出密码框）…": "(1) Installing the privileged helper (macOS will prompt for your password)…",
-    "① 提权助手已安装，跳过": "(1) Privileged helper already installed, skipping",
-    "① 提权助手版本过旧，重新安装（macOS 将弹出密码框）…": "(1) Privileged helper is outdated, reinstalling (macOS will prompt for your password)…",
-    "② 关屏联动防睡眠：已开启": "(2) Anti-sleep linked to blanking: enabled",
-    "② 已开启「关屏时联动防睡眠」，恢复显示时自动复位": "(2) Enabled \"link anti-sleep to blanking\" — it resets automatically when the display is restored",
-    "③ 常驻服务运行中：防睡眠将随黑屏自动联动，也可在菜单栏单独开关": "(3) Resident service is running: anti-sleep will follow blanking automatically, and can also be toggled from the menu bar",
-    "③ 电量 ": "(3) Battery at ",
-    "③ 立即开启系统级防睡眠…": "(3) Enabling system-level anti-sleep now…",
-    "③ 防睡眠守护已在运行": "(3) The anti-sleep daemon is already running",
-    "○ 屏幕正常": "○ Display on",
-    "● 屏幕已关闭 · 机器运行中": "● Display off · machine running",
-    "⚠️  亮度接口不可用（DisplayServices 缺失），关屏功能将无法工作": "⚠️  Brightness API unavailable (DisplayServices missing) — blanking will not work",
-    "⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行": "⚠️ Post-install check failed (missing the owner-accounting field) — the install may not have taken effect, please run it again",
-    "⚠️ 快捷键未生效 —— 点击排查": "⚠️ Hotkey not working — click to diagnose",
-    "✅ 一键配置完成。查看状态: lidkeep nosleep status": "✅ One-click setup complete. Check the status with: lidkeep nosleep status",
-    "✅ 已注册": "✅ registered",
-    "　兜底 ": "  fallback ",
-    "。\n\n可能原因：① 该组合被其他 App 抢先接管，换一个组合再试；② 本程序刚重装，系统热键表尚未刷新，退出重开一次。": ".\n\nLikely causes: (1) another app grabbed this combo — pick a different one and retry; (2) the app was just reinstalled and macOS has not refreshed its hotkey table yet — quit and relaunch once.",
-    "。\n\n本程序使用系统级全局热键，不需要「辅助功能 / 输入监控」授权。若组合被其他 App 占用，请在设置里换一个。": ".\n\nThis app uses a system-level global hotkey, so it needs no Accessibility or Input Monitoring grant. If another app took the combo, pick a different one in Settings.",
-    "。请换一个组合（建议 ⇧⌘B 或 ⌃⌥⌘B）。": ". Pick a different combo (⇧⌘B or ⌃⌥⌘B suggested).",
-    "「合盖后不睡眠」需要提权助手": "\"Stay awake with lid closed\" needs the privileged helper",
-    "」以 root 执行 ": "\" to run as root ",
-    "一次性模式黑屏中 pid=": "Blanked in one-shot mode pid=",
-    "一键安装并开启": "Install and enable in one click",
-    "一键防睡眠": "One-click Anti-sleep",
-    "上一个 LidKeep 实例": "The previous LidKeep instance",
-    "不启用（一直保持黑屏）": "Disabled (stay blank)",
-    "不限": "No limit",
-    "不限制": "No limit",
-    "两者功能完全重叠，同时运行会互相抢占状态。": "Their functions overlap completely, so running both makes them fight over state.",
-    "主显示器": "Built-in display",
-    "亮度 -> ": "Brightness -> ",
-    "亮度恢复失败，正在持续重试": "Failed to restore brightness, retrying continuously",
-    "亮度接口不可用（DisplayServices 缺失），无法关屏": "Brightness API unavailable (DisplayServices missing) — cannot blank the display",
-    "但同样意味着：关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。": "It also means anyone with access to the keyboard and mouse can still operate the machine while blanked — they just cannot see anything.",
-    "兜底超时 ": "Fallback timeout ",
-    "全局热键已注册 ": "Global hotkey registered ",
-    "全局热键已按设置停用": "Global hotkey disabled in settings",
-    "关": "Off",
-    "关屏只是把背光调到 0，画面仍在渲染——这正是远程/屏幕共享仍能使用的原因。": "Blanking only drives the backlight to 0 — the picture is still being rendered, which is exactly why remote desktop and screen sharing keep working.",
-    "关闭": "Off",
-    "关闭显示器": "Turn Display Off",
-    "关闭显示器  ": "Turn Display Off  ",
-    "写出失败: ": "Failed to write: ",
-    "卸载失败: ": "Uninstall failed: ",
-    "卸载提权助手": "Uninstall Privileged Helper",
-    "双常驻": "Both registered",
-    "发现遗留黑屏状态，自愈恢复到 ": "Found a leftover blanked state, self-healing back to ",
-    "取消": "Cancel",
-    "可能原因：电池电量低于下限 / 守护启动未确认。\n详见「打开日志」。": "Likely causes: battery below the floor / the daemon did not confirm startup.\nSee \"Open Log\" for details.",
-    "合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。": "Closing the lid triggers system sleep; only pmset running as root can prevent it.",
-    "合盖时熄灭内屏": "Blank the built-in display when the lid closes",
-    "lid: 设置中已关闭「合盖时熄灭内屏」，本次只保持机器运行，不干预屏幕亮度": "lid: \"Blank the display when the lid closes\" is off in Settings — keeping the machine awake only, leaving brightness alone",
-    "启动": "Startup",
-    "启动失败: ": "Failed to start: ",
-    "启动失败，请查看 ": "Failed to start, see ",
-    "启动防睡眠守护进程失败: ": "Failed to start the anti-sleep daemon: ",
-    "固定 %.0f%%": "Fixed at %.0f%%",
-    "固定为": "Fixed at",
-    "外接显示器": "External display",
-    "好": "OK",
-    "安全提醒": "Safety note",
-    "安装失败: ": "Installation failed: ",
-    "安装完成": "Installation complete",
-    "安装提权助手": "Install Privileged Helper",
-    "安装提权助手…": "Install Privileged Helper…",
-    "安装提权助手（首次使用）…": "Install Privileged Helper (first run)…",
-    "完成": "Done",
-    "将安装一个仅允许「": "This installs a grant allowing only \"",
-    "已停止防睡眠：": "Anti-sleep stopped: ",
-    "已写入配置，但未能注册 launchd": "Saved to config, but could not register with launchd",
-    "已写入配置，但未能注册到 launchd": "Saved to config, but could not register with launchd",
-    "已写出资产到 ": "Assets written to ",
-    "已到设定时长 ": "Reached the set duration of ",
-    "已卸载提权助手，并已复位系统睡眠设置": "Privileged helper uninstalled and system sleep settings reset",
-    "已发送停止指令（5s 内未确认，请查看 ": "Stop command sent (if it is not confirmed within 5s, see ",
-    "已发送切换指令（3s 内未确认，请查看 ": "Toggle command sent (if it is not confirmed within 3s, see ",
-    "已发送进入黑屏指令（3s 内未确认，请查看 ": "Blanking command sent (if it is not confirmed within 3s, see ",
-    "已合盖": "Lid closed",
-    "已合盖（已自动熄灭）": "Lid closed (turned off automatically)",
-    "已启动但未确认，请查看 ": "Started but not confirmed, see ",
-    "已在黑屏模式 (pid ": "Already in blank mode (pid ",
-    "已安装": "installed",
-    "已完成": "Done",
-    "已完成（无输出）": "Done (no output)",
-    "已开启": "On",
-    "已恢复显示": "Display restored",
-    "已恢复显示，亮度 ": "Display restored, brightness ",
-    "已接电源": "On AC power",
-    "已有常驻服务在运行 (pid ": "A resident service is already running (pid ",
-    "已注册": "Registered",
-    "已确认系统把 ": "Confirmed that macOS delivered ",
-    "已被系统或其他 App 占用，请换一个组合": "Taken by macOS or another app — pick a different combo",
-    "已进入黑屏模式 pid=": "Entered blank mode pid=",
-    "已进入黑屏（常驻服务 pid=": "Blanked (resident service pid=",
-    "常驻服务: 未运行（用 `lidkeep service install` 启用）": "Resident service: not running (enable it with `lidkeep service install`)",
-    "常驻服务: 运行中 pid=": "Resident service: running pid=",
-    "常驻服务已卸载": "Resident service uninstalled",
-    "常驻服务已启动 pid=": "Resident service started pid=",
-    "常驻服务运行中 pid=": "Resident service running pid=",
-    "开": "On",
-    "开启（系统不会睡眠）": "On (the system will not sleep)",
-    "开启（系统当前不会睡眠）": "On (the system will not sleep right now)",
-    "开盖": "lid open",
-    "开（黑屏期间阻止系统睡眠，恢复显示时自动复位）": "On (prevents system sleep while blanked, resets automatically when the display is restored)",
-    "当前不在黑屏模式": "Not in blank mode",
-    "当前亮度 ": "Current brightness ",
-    "当前正常显示": "Display is currently on",
-    "当前系统级防睡眠: 关闭（用 `lidkeep nosleep on --system` 开启）": "System-level anti-sleep is currently off (enable it with `lidkeep nosleep on --system`)",
-    "当前黑屏中": "Currently blanked",
-    "快捷键未生效": "Hotkey not working",
-    "恢复亮度 ": "Restoring brightness ",
-    "恢复到关屏前的亮度": "Restore the brightness from before blanking",
-    "恢复后的亮度": "Brightness after restore",
-    "恢复指令已发送（3s 内仍在黑屏，请查看 ": "Restore command sent (if the display is still blank after 3s, see ",
-    "恢复方式: 热键 ": "To restore: hotkey ",
-    "恢复显示器  ": "Restore Display  ",
-    "恢复热键": "Restore hotkey",
-    "手动关闭": "Turned off manually",
-    "打开日志": "Open Log",
-    "打开设置": "Open Settings",
-    "授权失败或被取消": "Authorization failed or was cancelled",
-    "探测失败（sudo 免密授权可能失效，重新安装助手可修复）": "Probe failed (the passwordless sudo grant may have expired; reinstalling the helper fixes it)",
-    "提权助手已安装，无需重复操作（加 --force 可覆盖安装 / 升级）": "The privileged helper is already installed; nothing to do (add --force to overwrite or upgrade)",
-    "提权助手未安装": "Privileged helper not installed",
-    "提权助手过旧": "Privileged helper outdated",
-    "提权助手：已安装 —— 防睡眠可覆盖电池供电与合盖。": "Privileged helper: installed — anti-sleep covers battery power and a closed lid.",
-    "提权助手：未安装 —— 此时防睡眠仅在本机接电源时有效，": "Privileged helper: not installed — anti-sleep only works on AC power;",
-    "提权助手：版本过旧 —— 缺少多持有者记账，关屏联动与手动防睡眠会互相关掉对方。": "Privileged helper: outdated — it lacks multi-owner accounting, so blanking-linked and manual anti-sleep can turn each other off.",
-    "提示：未安装提权助手，系统级防睡眠（电池 / 合盖）不可用。": "Note: the privileged helper is not installed, so system-level anti-sleep (battery / closed lid) is unavailable.",
-    "收到 SIGUSR1": "Received SIGUSR1",
-    "收到 SIGUSR2": "Received SIGUSR2",
-    "收到终止信号": "Termination signal received",
-    "收到退出信号": "Exit signal received",
-    "无常驻进程": "No resident process",
-    "无法写入临时脚本: ": "Could not write the temporary script: ",
-    "无法启动 ": "Could not start ",
-    "无法启动 osascript: ": "Could not launch osascript: ",
-    "无法访问 DisplayServices 私有框架，亮度控制不可用（本 macOS 可能已移除它）": "Cannot access the private DisplayServices framework, so brightness control is unavailable (this macOS may have removed it)",
-    "日志：": "Log: ",
-    "显示器 ": "Display ",
-    "未安装（电池 / 合盖防睡眠不可用）": "not installed (anti-sleep on battery / closed lid unavailable)",
-    "未开启": "Off",
-    "未找到命令行工具": "Command-line tool not found",
-    "未注册": "not registered",
-    "未注册（设置里勾选「登录时启动」）": "not registered (tick \"Launch at Login\" in Settings)",
-    "未能关屏：": "Could not blank the display: ",
-    "未能切换：": "Could not toggle: ",
-    "检测到菜单栏 App（LidKeep）已注册为常驻服务。": "The menu bar app (LidKeep) is already registered as a resident service.",
-    "正常显示": "Display on",
-    "正常模式（无常驻服务），当前亮度 ": "Normal mode (no resident service), current brightness ",
-    "残留黑屏状态": "Leftover blanked state",
-    "注册失败（OSStatus ": "Registration failed (OSStatus ",
-    "点击「一键防睡眠」安装（弹一次系统密码框，仅授权单个脚本的固定参数）。": "Click \"One-click Anti-sleep\" to install it (one system password prompt; grants only one script with fixed arguments).",
-    "装好后「合盖不睡」会自动生效，无需再点。": "Once installed, \"awake with the lid closed\" turns on by itself — no need to click again.",
-    "热键可用": "Hotkey working",
-    "热键失效时的安全网。设为「不启用」则一直保持黑屏，直到手动恢复或退出本程序。": "A safety net if the hotkey stops working. Set it to \"Disabled\" to stay blank until you restore manually or quit the app.",
-    "热键无修饰键": "Hotkey has no modifier",
-    "热键未响应": "Hotkey not responding",
-    "热键注册失败 ": "Hotkey registration failed ",
-    "热键自检": "Hotkey Self-test",
-    "热键触发": "Hotkey pressed",
-    "用法: lidkeep service install | uninstall | status": "Usage: lidkeep service install | uninstall | status",
-    "电池 ": "Battery ",
-    "电池供电与合盖仍会睡眠。安装需输入登录密码，只授权一个脚本的四个固定参数。": "on battery or with the lid closed the Mac still sleeps. Installing asks for your login password and grants only one script with four fixed arguments.",
-    "电源: ": "Power: ",
-    "电源适配器": "Power adapter",
-    "电量 ": "Battery ",
-    "电量下限 ": "Battery floor ",
-    "电量保护": "Battery guard",
-    "电量已达下限 ": "Battery reached the floor ",
-    "登录时启动": "Launch at Login",
-    "登录时自动启动（菜单栏常驻）": "Launch at login (stay in the menu bar)",
-    "示例: lidkeep config --mods cmd,shift --key 0": "Example: lidkeep config --mods cmd,shift --key 0",
-    "离开座位前请手动锁屏（⌃⌘Q）。": "Lock the screen manually (⌃⌘Q) before you walk away.",
-    "程序退出": "app quit",
-    "立即熄灭屏幕，机器保持运行；再点一次（或按热键）恢复": "Blanks the screen now while the machine keeps running; click again (or press the hotkey) to restore",
-    "策略": "Policy",
-    "系统: ": "System: ",
-    "系统级（含电池与合盖）": "System level (covers battery and closed lid)",
-    "组合无效（全局热键需要至少一个修饰键）": "Combo invalid (a global hotkey needs at least one modifier)",
-    "结论：⚠️  ": "Result: ⚠️  ",
-    "结论：✅ 一切正常": "Result: ✅ everything is fine",
-    "结论：❌ ": "Result: ❌ ",
-    "自动恢复兜底": "Fallback auto-restore",
-    "自检未收到 ": "The self-test did not receive ",
-    "警告：首次设置亮度 0 失败": "Warning: the first attempt to set brightness to 0 failed",
-    "让「息屏时不睡眠」「合盖后不睡眠」覆盖电池与合盖（需 root，弹一次密码框）": "Lets \"Stay awake while blanked\" and \"Stay awake with lid closed\" cover battery and closed lid (needs root; one password prompt)",
-    "设置…": "Settings…",
-    "设置亮度失败：亮度接口不可用或被系统拒绝（当前 macOS 可能已移除 DisplayServices）\n": "Failed to set brightness: the brightness API is unavailable or was refused (this macOS may have removed DisplayServices)\n",
-    "请先在终端安装 lidkeep，或手动执行：\nlidkeep nosleep install-helper": "Install the lidkeep command-line tool first, or run it manually:\nlidkeep nosleep install-helper",
-    "请先安装 lidkeep 命令行工具（.pkg 安装包已包含）。": "Install the lidkeep command-line tool first (included in the .pkg installer).",
-    "请卸载后重新安装（需要输入一次登录密码）。": "Uninstall and reinstall it (requires your login password once).",
-    "请在「终端」中执行：\n\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/": "Run this in Terminal:\n\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/",
-    "请在终端执行：\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/": "Run this in Terminal:\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/",
-    "读取亮度失败：亮度接口不可用": "Failed to read brightness: the brightness API is unavailable",
-    "超时自动恢复": "Timed out, restoring automatically",
-    "运行自检": "Run self-test",
-    "进入黑屏前的亮度": "The brightness from before blanking",
-    "进程级（仅电源适配器）": "Process level (AC power only)",
-    "退出": "Quit",
-    "配置已保存: ": "Config saved: ",
-    "配置已自动重载 热键=": "Config reloaded automatically, hotkey=",
-    "重试成功，亮度已恢复 ": "Retry succeeded, brightness restored ",
-    "错误：--battery 需要 0-100 的整数（0 = 不限制），收到: ": "Error: --battery needs an integer from 0 to 100 (0 = no limit), got: ",
-    "错误：--key 需要 0-127 的虚拟键码，收到: ": "Error: --key needs a virtual key code from 0 to 127, got: ",
-    "错误：--restore 需要 original（关屏前亮度）或 0.0-1.0 的数值，收到: ": "Error: --restore needs \"original\" (brightness before blanking) or a value from 0.0 to 1.0, got: ",
-    "错误：--timeout 需要非负秒数（0 = 不启用兜底），收到: ": "Error: --timeout needs a non-negative number of seconds (0 = no fallback), got: ",
-    "错误：亮度必须在 0.0-1.0 之间，收到: ": "Error: brightness must be between 0.0 and 1.0, got: ",
-    "错误：亮度恢复失败，转入持续重试": "Error: failed to restore brightness, switching to continuous retry",
-    "错误：亮度恢复失败，转入持续重试（屏幕必须亮回来）": "Error: failed to restore brightness, switching to continuous retry (the screen must come back)",
-    "错误：亮度需要 0.0-1.0 的数值，收到: ": "Error: brightness needs a value from 0.0 to 1.0, got: ",
-    "错误：全局热键必须包含至少一个修饰键，否则系统无法注册（会静默失效）。": "Error: a global hotkey must include at least one modifier, otherwise macOS cannot register it (it fails silently).",
-    "防睡眠: ": "Anti-sleep: ",
-    "防睡眠已关闭": "Anti-sleep turned off",
-    "防睡眠已在运行 pid=": "Anti-sleep is already running pid=",
-    "防睡眠已开启 pid=": "Anti-sleep enabled pid=",
-    "防睡眠未在运行": "Anti-sleep is not running",
-    "防睡眠降级为「仅电源适配器」：未安装提权助手，电池与合盖仍会睡眠": "Anti-sleep downgraded to \"AC power only\": the privileged helper is not installed, so battery and closed lid still sleep",
-    "黑屏中": "Blanked",
-    "黑屏后": "After blanking",
-    "（Carbon 链路，无需授权）": "(Carbon path, no grants needed)",
-    "（仅授权单个 root:wheel 脚本的四个固定参数）": "(grants a single root:wheel script with four fixed arguments)",
-    "（可用亮度归零关闭）": " (can be turned off by zeroing brightness)",
-    "（四个固定参数：on / off / status / detect）的授权条目。": " (four fixed arguments: on / off / status / detect).",
-    "（放电中）": " (discharging)",
-    "（无修饰键）": "(no modifier)",
-    "（用 `lidkeep nosleep off` 关闭）": "(turn it off with `lidkeep nosleep off`)",
-    "）": ")",
-    "）恢复: 热键或 lidkeep on": ") Restore: hotkey or lidkeep on",
-    "，": ", ",
-    "，SMC 合盖检测正常": ", SMC lid detection working",
-    "，兜底 ": ", fallback ",
-    "，层级: ": ", level: ",
-    "，当前亮度 ": ", current brightness ",
-    "，当前实际亮度 ": ", actual brightness now ",
-    "，待恢复亮度 ": ", brightness pending restore ",
-    "，机器保持运行；外接屏不受影响）": ", machine keeps running; external displays unaffected)",
-    "，点击打开菜单": ", click to open the menu",
-    "，电量下限 ": ", battery floor ",
-    "，结束 caffeinate": ", ending caffeinate",
-    "：": ": ",
-    "：⚠️ ": ": ⚠️ ",
-    "：已有常驻服务 pid=": ": a resident service is already running with pid=",
-    "：组合已被其他 App 占用（lidkeep config --mods ... --key ... 换一个）": ": the combo is taken by another app (change it with: lidkeep config --mods ... --key ...)",
-    "；": "; ",
-    "错误：--lang 需要 auto（跟随系统）/ zh / en，收到: ": "Error: --lang needs auto (follow the system) / zh / en, got: ",
-    "  界面语言: ": "  Interface language: ",
-    "跟随系统": "Follow the system",
-    "中文": "Chinese",
-    "英文": "English",
-    "（--lang auto/zh/en）": " (--lang auto/zh/en)",
-    "保持屏幕常亮": "Keep display on",
-    "合盖运行": "Run with lid closed",
-    "合盖也持续运行，内屏熄灭，建议接电源": "Keeps running with the lid closed, built-in display off - plug in if you can",
-    "（已生效 · 系统级）": " (active - system level)",
-    "（已生效 · 仅接电源）": " (active - on AC power only)",
-    "（已 ": " (for ",
-    "个别机型熄屏后亮度回不来时，可单独关掉它作为退路。": "on the rare Mac where brightness does not come back, turn it off as a way out.",
-    "合盖运行建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。": "Run it on AC power if you can; it stops on its own when the battery drops below the floor. Needs the privileged helper (install below).",
-    "\n【电源断言】": "\n[Power assertions]",
-    "  下面列出此刻真正在阻止 Mac 睡眠的持有者（pmset -g assertions）。": "  Listed below is everything actually keeping this Mac awake right now (pmset -g assertions).",
-    "  · 本程序：未持有断言": "  - This app: holding no assertion",
-    "  ✅ 本程序持有 pid=": "  [ok] Held by this app, pid=",
-    "  ✅ 无第三方持有者": "  [ok] Nothing else is holding an assertion",
-    "  ℹ️ 其他持有者 pid=": "  [info] Other holder, pid=",
-    "（未署名）": "(unnamed)",
-    "     → 这些与本程序无关；若要让 Mac 恢复自动睡眠，需到对应应用里关闭。": "     -> These are not from this app; turn them off in the owning app to let the Mac sleep again.",
-    "  ⚠️  配置要求防睡眠，但当前没有任何断言在生效中（黑屏时才会起断言）": "  [warn] Settings ask to prevent sleep, but no assertion is active right now (it starts when the display is blanked)",
-    "防睡眠未生效": "Sleep prevention not in effect",
-    // 自动检查更新
-    "自动检查更新": "Check for updates automatically",
-    "后台每 24 小时查一次 GitHub 上的最新版本号；发现新版只在菜单栏打标，不弹窗打断。": "Checks GitHub for the latest version once every 24 hours in the background; a newer release is flagged in the menu bar instead of interrupting with a dialog.",
-    "请求只读取公开的版本号，不上传任何本机信息。手动「检查更新…」不受这个开关限制。": "The request only reads a public version number and uploads nothing about this Mac. The manual \"Check for Updates…\" ignores this switch.",
-    "⬆ 有新版本 ": "⬆ Update available ",
-    " —— 打开发布页": " — open the release page",
-    "发布页地址无效": "Invalid release page URL",
-    // 检查更新 / 关于 / 跳转开源仓库
-    "检查更新…": "Check for Updates…",
-    "关于 LidKeep": "About LidKeep",
-    "在 GitHub 上查看": "View on GitHub",
-    "打开发布页": "Open Release Page",
-    "已是最新版本": "Up to Date",
-    "你正在使用最新版本 ": "You're on the latest version ",
-    "发现新版本": "Update Available",
-    "当前版本 ": "Current version ",
-    "最新版本 ": "Latest version ",
-    "点击「打开发布页」前往下载。": "Click “Open Release Page” to download.",
-    "检查更新失败": "Update Check Failed",
-    "你可以手动前往发布页查看。": "You can also check the releases page manually.",
-    "关屏但不睡眠，合盖继续运行。": "Blanks the display without sleeping; keeps running with the lid closed.",
-    "版本": "Version",
-    "许可证": "License",
-    "开源仓库": "Repository",
-
-    // 设置面板改版：分页、热键录入、电池动作
-    " —— ": " — ",
-    "无法解析更新信息": "Could not read the release information",
-    "通用": "General",
-    "热键": "Hotkey",
-    "电池": "Battery",
-    "其他": "Other",
-    "关于": "About",
-    "启用全局热键": "Enable the global hotkey",
-    "关闭后只能用菜单栏点击操作。热键由系统级 Carbon 链路注册，不需要「辅助功能 / 输入监控」授权，也不会因重装 App 而失效。": "With it off, the menu bar is the only way to toggle. The hotkey goes through the system-level Carbon path, so it needs no Accessibility or Input Monitoring permission and keeps working after the app is reinstalled.",
-    "快捷键": "Shortcut",
-    "点按上面的按钮，再直接按下新组合键即可；⌫ 清除，Esc 取消。系统级热键必须包含 ⌘ / ⌃ / ⌥ / ⇧ 中的至少一个。": "Click the button above, then press the new combination. ⌫ clears it, Esc cancels. A system hotkey must include at least one of ⌘ / ⌃ / ⌥ / ⇧.",
-    "按下组合键…（Esc 取消）": "Press a combination… (Esc to cancel)",
-    "恢复默认": "Reset to default",
-    "已按设置停用全局热键，仅能从菜单栏点击操作。": "The global hotkey is turned off in settings — use the menu bar instead.",
-    "：✅ 已注册为系统全局热键": ": ✅ registered as a system-wide hotkey",
-    "使用电池且正在放电时，剩余电量降到这个数值就触发下面的动作。拖到 0 表示不限制。插着电源时完全不干预。": "While on battery power and discharging, reaching this level triggers the action below. Drag to 0 for no limit. Never interferes while plugged in.",
-    "阈值": "Threshold",
-    "达到阈值后": "When it is reached",
-    "恢复屏幕，继续防睡眠": "Restore the display, stay awake",
-    "恢复屏幕并撤销防睡眠（回到原本的电池行为）": "Restore the display and release anti-sleep (back to normal battery behaviour)",
-    "只提醒，不自动干预": "Notify only, change nothing",
-    "屏幕亮起，机器继续保持不睡眠。适合还要把任务跑完的场景。": "The display wakes and the Mac stays awake. Pick this when a job still has to finish.",
-    "屏幕亮起，同时撤销防睡眠并退出合盖运行，Mac 回到系统原本的省电行为，可以正常睡眠。": "The display wakes, anti-sleep is released and lid-closed mode exits, so the Mac returns to its normal power behaviour and can sleep again.",
-    "只在通知中心提醒一次，不改变任何状态，由你自己决定。": "One notification only. Nothing is changed — the call is yours.",
-
-    // CLI：--battery-action / --hotkey
-    "错误：--battery-action 需要 0 / 1 / 2（0=恢复屏幕，1=恢复并撤销防睡眠，2=只提醒），收到: ": "Error: --battery-action needs 0 / 1 / 2 (0 = restore the display, 1 = restore and release anti-sleep, 2 = notify only), got: ",
-    "错误：--hotkey 需要 on / off，收到: ": "Error: --hotkey needs on or off, got: ",
-    "  电量触底动作: ": "  On reaching the floor: ",
-    "  全局热键: ": "  Global hotkey: ",
-    "启用": "Enabled",
-    "停用（只能从菜单栏点击）": "Disabled (menu bar only)",
-]

@@ -943,7 +943,7 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
         let m = L("无法访问 DisplayServices 私有框架，亮度控制不可用（本 macOS 可能已移除它）")
         try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
         let errBody: String
-        if L10n.isEN {
+        if !L10n.isChinese {
             errBody = """
             Error: \(m)
             This tool needs that framework to set brightness to 0. Please report your macOS version at
@@ -1629,7 +1629,7 @@ case "service":
             print((L("  开机自启，日志: ") + "\(serviceLog)"))
         } else {
             let plistBody: String
-            if L10n.isEN {
+            if !L10n.isChinese {
                 plistBody = """
                 plist written: \(plistFile)
                 but this environment cannot talk to launchd (common when invoked from a sandbox or automation).
@@ -1799,8 +1799,15 @@ case "nosleep":
         print(L("✅ 一键配置完成。查看状态: lidkeep nosleep status"))
 
     case "off":
-        // 无论守护是否在跑，「off」都表达「不再需要防睡眠」——持久标志必须一起清
-        clearLidAwake()
+        // 无论守护是否在跑，「off」都表达「不再需要防睡眠」——持久标志必须一起清。
+        //
+        // 唯一例外是 `--no-persist`：菜单栏 App 的过热保护走这条，它只要停掉守护，
+        // 方案必须一个字都不动 —— 热量是瞬时状态，降温后要能按原方案把守护装回来。
+        // 这里若照常清标志，用户一次编译过热就会永久丢掉「合盖保持唤醒」的设置，
+        // 恰好是过热保护承诺绝不会发生的事。
+        // 这个开关必须开在**子进程**上：Bar 那侧的 `persist: false` 只管住自己不写盘，
+        // 管不住它 spawn 出来的这条命令（实测：不带这个参数时配置照样被改写）。
+        if !args.contains("--no-persist") { clearLidAwake() }
         guard let pid = nosleepPid() else {
             // 守护进程没了但全局开关可能还开着——这是必须补救的残留态
             recoverStaleNosleep()
@@ -1927,7 +1934,7 @@ case "nosleep":
 
     default:
         let nosleepHelp: String
-        if L10n.isEN {
+        if !L10n.isChinese {
             nosleepHelp = """
             Usage: lidkeep nosleep <subcommand>
               setup                         All-in-one: install helper + link to blanking + start anti-sleep
@@ -2079,8 +2086,12 @@ case "config":
         }
         else if args[i] == "--lang", i + 1 < args.count {
             let v = args[i + 1].lowercased()
-            guard ["auto", "zh", "en"].contains(v) else {
-                print((L("错误：--lang 需要 auto（跟随系统）/ zh / en，收到: ") + "\(args[i + 1])")); exit(1)
+            // auto 之外一律用 L10n.normalize 判定，而不是在这里再抄一份语言清单 ——
+            // 抄一份就多一个「加了语言却忘了改这里」的机会。
+            guard v == "auto" || L10n.normalize(v) != nil else {
+                print((L("错误：--lang 需要 auto（跟随系统）或语言代码，收到: ") + "\(args[i + 1])"))
+                print(L("  可选: ") + L10n.langList)
+                exit(1)
             }
             c.lang = v; i += 2
         }
@@ -2113,8 +2124,7 @@ case "config":
     print((L("  全局热键: ") + "\(c.hotkeyEnabled ? L("启用") : L("停用（只能从菜单栏点击）"))"))
     print((L("  关屏联动防睡眠: ") + "\(c.autoNosleep ? L("开（黑屏期间阻止系统睡眠，恢复显示时自动复位）") : L("关"))"))
     printPlans(c)
-    let langName = c.lang == "auto" ? L("跟随系统") : (c.lang == "zh" ? L("中文") : L("英文"))
-    print((L("  界面语言: ") + "\(langName)" + L("（--lang auto/zh/en）")))
+    print((L("  界面语言: ") + L10n.displayName(c.lang) + L("（--lang ") + L10n.langList + L("）")))
     print(L("  修改: lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep"))
 
 case "off":
@@ -2229,7 +2239,10 @@ case "bright":
 
 default:
     let helpBody: String
-    if L10n.isEN {
+    // 这段长帮助是多行字面量、不走文案表，因此只有中/英两套。
+    // 判据必须写成「不是中文」而不是「是英文」：否则日/韩/德/法/西用户会掉进
+    // else 分支拿到中文帮助，比拿到英文更难用。
+    if !L10n.isChinese {
         helpBody = """
         lidkeep — turn the display off without putting the Mac to sleep.
 

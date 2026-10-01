@@ -68,7 +68,7 @@ struct Config: Codable {
     var lidBlackout: Bool = true             // 合盖时熄灭内屏。
                                              // 与 lidAwake 分离：熄屏由合盖守护执行，
                                              // 关掉它则合盖只保持机器运转、内屏维持原亮度（熄屏异常时的退路）。
-    var lang: String = "auto"                // 界面语言：auto=跟随系统 / zh / en
+    var lang: String = "auto"                // 界面语言：auto=跟随系统 / zh / en / ja / ko / de / fr / es
     var keepDisplayOn: Bool = false          // 保持屏幕常亮：阻止显示器自动睡眠（caffeinate -d）
     /// 配置结构版本。旧配置没有这个字段 → 读出 0 → 由 migrate() 补齐语义。
     /// 字段语义一旦变过，老配置必须能被纠正，而不是沿用写盘时的旧含义。

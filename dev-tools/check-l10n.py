@@ -1,20 +1,35 @@
 #!/usr/bin/env python3
-"""校验 L10n 文案表与调用点**双向**对齐。
+"""校验 L10n 文案表与调用点**双向**对齐，并报告各语言覆盖率。
 
 为什么需要这个：漏翻的后果是**中文环境下完全正常**（L 找不到键就原样返回），
-英文环境才吐出中文。这种 bug 作者自己永远测不出来，只能靠机器查。
-`make test` 会先跑本脚本，缺键直接失败。
+其它语言环境才吐出中文。这种 bug 作者自己永远测不出来，只能靠机器查。
+`make test` 会先跑本脚本，结构性错误直接失败。
 
-反方向同样要查：**字典里没人用的死键**。改名 / 改版之后旧文案留在表里，
-既不会被显示、也不会被任何人发现，只会让后来读代码的人以为还有那些功能
-（实测积累过 54 条：「运行模式」「四选一」这类已删除特性的文案）。
-键是"中文原文 → 英文译文"，每行一条，删掉一行就完事，所以死键一律当失败报出。
+键的**唯一基线**是 `Sources/Shared/L10nEN.swift`（英文表）：
+调用点写 `L("中文原文")`，键就是那串中文原文。新增语言只需再加一份
+`L10nXX.swift`，键必须与英文表逐字一致 —— 本脚本负责证明这一点。
+
+检查项分两类：
+
+  【失败】结构性问题，一定是 bug：
+    1. 调用点的字面量不在英文表里 —— 其它语言会露出中文
+    2. 英文表里的死键 —— 改名/改版后的残留，会让读者误以为功能还在
+    3. 某语言表出现英文表里没有的键 —— 键抄错或基线漂移
+    4. 某语言表内重复键 —— Swift 字典字面量重复键会在运行期随机取一个
+
+  【报告】不失败，但需要人看：
+    5. 各语言覆盖率（未覆盖的条目按设计降级为英文，不会坏界面）
+    6. 译文与中文键**逐字相同**的条目 —— 多数是忘了翻，少数是标点类条目
+       （如日文的「：」「）」与中文写法一致）。逐条确认即可。
 
 用法：python3 dev-tools/check-l10n.py [仓库根目录]
 """
 import pathlib
 import re
 import sys
+
+# 语言表文件：L10nEN.swift / L10nJA.swift / …；L10n.swift 是引擎，不算表。
+TABLE_RE = re.compile(r"^L10n([A-Z]{2})\.swift$")
 
 
 def unescape(s: str) -> str:
@@ -38,33 +53,44 @@ def swift_escape(s: str) -> str:
 
 
 def strip_comments(src: str) -> str:
-    """去掉注释：注释里提到某段文案不算"还在用"。"""
+    """去掉注释：注释里提到某段文案不算「还在用」。"""
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     return "\n".join(re.sub(r"//.*$", "", ln) for ln in src.split("\n"))
 
 
+PAIR_RE = re.compile(r'^\s*"((?:[^"\\]|\\.)*)":\s*"((?:[^"\\]|\\.)*)",?\s*$', re.M)
+
+
+def parse_table(path: pathlib.Path):
+    """解析一份文案表，返回 [(键, 译文)]（按出现顺序，保留重复项以便查重）。"""
+    return [(unescape(k), unescape(v))
+            for k, v in PAIR_RE.findall(path.read_text(encoding="utf-8"))]
+
+
 def main() -> int:
     root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-    l10n_path = root / "Sources/Shared/L10n.swift"
-    if not l10n_path.is_file():
-        print(f"找不到 {l10n_path}", file=sys.stderr)
+    shared = root / "Sources/Shared"
+    en_path = shared / "L10nEN.swift"
+    if not en_path.is_file():
+        print(f"找不到 {en_path}（英文表是键的唯一基线）", file=sys.stderr)
         return 2
 
-    l10n_src = l10n_path.read_text(encoding="utf-8")
-    # 字典键形如   "原文": "译文",   每行一条
-    keys = [unescape(raw)
-            for raw in re.findall(r'^\s*"((?:[^"\\]|\\.)*)":', l10n_src, re.M)]
+    en_pairs = parse_table(en_path)
+    keys = [k for k, _ in en_pairs]
+    key_set = set(keys)
+    rc = 0
 
+    # ---- 1/2. 调用点 ↔ 英文表 双向对齐 ----
     missing, total, code = [], 0, []
     for f in sorted(root.glob("Sources/**/*.swift")):
-        if f.name == "L10n.swift":
-            continue
+        if TABLE_RE.match(f.name):
+            continue                      # 表文件里没有 L() 调用点
         src = f.read_text(encoding="utf-8")
         code.append(strip_comments(src))
         for m in re.finditer(r'\bL\(\s*"((?:[^"\\]|\\.)*)"', src):
             total += 1
             lit = unescape(m.group(1))
-            if lit not in keys:
+            if lit not in key_set:
                 line = src[: m.start()].count("\n") + 1
                 missing.append(f"{f}:{line}: {lit!r}")
 
@@ -72,10 +98,11 @@ def main() -> int:
     dead = [k for k in keys
             if not any(f'"{r}"' in haystack for r in {k, swift_escape(k)})]
 
-    print(f"L() 调用点 {total} 处，L10n 键 {len(keys)} 条")
-    rc = 0
+    dup_en = sorted({k for k in keys if keys.count(k) > 1})
+    print(f"英文表 {len(keys)} 条键（唯一 {len(key_set)}），L() 调用点 {total} 处")
+
     if missing:
-        print(f"\n✗ 缺失 {len(missing)} 条译文（英文界面会露出中文）：")
+        print(f"\n✗ 缺失 {len(missing)} 条译文（非中文界面会露出中文原文）：")
         for x in missing:
             print("   " + x)
         rc = 1
@@ -85,8 +112,50 @@ def main() -> int:
             print("   " + repr(k))
         print("   → 逐行删掉即可（键=中文原文，删行不影响译文配对）")
         rc = 1
+    if dup_en:
+        print(f"\n✗ 英文表重复键 {len(dup_en)} 条（字典字面量重复键会随机取一个）：")
+        for k in dup_en:
+            print("   " + repr(k))
+        rc = 1
+
+    # ---- 3/4/5/6. 各语言表 ----
+    tables = sorted((p for p in shared.glob("L10n??.swift") if p.name != "L10nEN.swift"),
+                    key=lambda p: p.name)
+    if tables:
+        print(f"\n各语言表（基线 {len(keys)} 条）：")
+        for p in tables:
+            pairs = parse_table(p)
+            tkeys = [k for k, _ in pairs]
+            orphan = sorted(set(tkeys) - key_set)
+            dup = sorted({k for k in tkeys if tkeys.count(k) > 1})
+            same = [k for k, v in pairs if v == k]
+            cover = len([k for k in tkeys if k in key_set])
+            pct = cover * 100 // len(keys) if keys else 0
+            flag = "✓" if (cover == len(keys) and not orphan and not dup) else "⚠"
+            print(f"  {flag} {p.name:<14} {cover}/{len(keys)} ({pct}%)"
+                  f"  未译={len(same)}  孤儿键={len(orphan)}  重复={len(dup)}")
+            if orphan:
+                print(f"      ✗ 英文表里没有这些键（键抄错或基线漂移），共 {len(orphan)} 条：")
+                for k in orphan[:10]:
+                    print("         " + repr(k))
+                if len(orphan) > 10:
+                    print(f"         …另有 {len(orphan) - 10} 条")
+                rc = 1
+            if dup:
+                print(f"      ✗ 表内重复键 {len(dup)} 条：")
+                for k in dup[:10]:
+                    print("         " + repr(k))
+                rc = 1
+            if same:
+                print(f"      ⚠ 译文与中文键逐字相同 {len(same)} 条"
+                      f"（标点类条目属正常，其余多半是漏翻）：")
+                for k in same[:15]:
+                    print("         " + repr(k))
+                if len(same) > 15:
+                    print(f"         …另有 {len(same) - 15} 条")
+
     if rc == 0:
-        print("✓ 双向对齐：无漏翻、无死键")
+        print("\n✓ 结构检查通过：无漏翻调用点、无死键、无孤儿键、无重复键")
     return rc
 
 

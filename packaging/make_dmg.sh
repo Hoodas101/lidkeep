@@ -69,8 +69,8 @@ Install / 安装:
 Click the ☀ / 🌙 menu bar icon to toggle the display; anti-sleep and settings live in the same menu.
 菜单栏图标 ☀ / 🌙 即可开关显示器；防睡眠与设置都在菜单里。
 
-The interface follows your system language (English / Chinese).
-界面语言跟随系统（中 / 英）。
+The interface follows your system language (Chinese / English / Japanese / Korean / German / French / Spanish).
+界面语言跟随系统（中 / 英 / 日 / 韩 / 德 / 法 / 西）。
 EOF
 
 # 清掉 AppleDouble / .DS_Store，避免污染镜像

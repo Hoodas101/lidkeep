@@ -5,11 +5,12 @@
 # 覆盖：版本/诊断输出、参数校验、配置往返、电量保护、关屏与恢复、孤儿进程、
 #       防睡眠启停、合盖熄屏与恢复（模拟）、提权助手资产一致性、守护掉电自停、
 #       守护唯一性、「息屏后保持唤醒」是否真的持有断言、它的电量下限释放、
-#       进程归属判定（不得被命令行里的路径字样骗到）。
+#       进程归属判定（不得被命令行里的路径字样骗到）、过热保护的分级放手与自动恢复。
 #
 # 慢用例的门控（两者需要相反的运行条件，各跑一次才全覆盖）：
 #   SMOKE_FULL=1 + App 未常驻  → 跑【11】合盖守护掉电自停
-#   SMOKE_FULL=1 + App 常驻    → 跑【13】常亮的电量下限释放、【14】息屏保持唤醒的电量下限释放
+#   SMOKE_FULL=1 + App 常驻    → 跑【13】常亮的电量下限释放、【14】息屏保持唤醒的电量下限释放、
+#                                【16】过热保护（serious 不放手 / critical 放手 / 降温后恢复）
 # 无论哪次运行，脚本都会在结尾把 config.json 还原成跑之前那份。
 #
 # 用法:
@@ -49,13 +50,13 @@ cleanup() {
     if [ -n "${DECOY_PIDS:-}" ]; then
         for p in $DECOY_PIDS; do kill "$p" 2>/dev/null; done
     fi
-    rm -f "$(dirname "$CFG")/_sim-battery"
+    rm -f "$(dirname "$CFG")/_sim-battery" "$(dirname "$CFG")/_sim-thermal"
     if [ -f /tmp/bs_cfg_user_backup.json ]; then
         cp /tmp/bs_cfg_user_backup.json "$CFG" 2>/dev/null
     fi
 }
 trap cleanup EXIT
-rm -f "$(dirname "$CFG")/_sim-battery"
+rm -f "$(dirname "$CFG")/_sim-battery" "$(dirname "$CFG")/_sim-thermal"
 
 ok()   { echo "  ✅ $1"; pass=$((pass + 1)); }
 bad()  { echo "  ❌ $1"; fail=$((fail + 1)); }
@@ -67,7 +68,7 @@ skip_() { echo "  ⏭  $1（$2）"; skip=$((skip + 1)); }
 if ps -o pid= -p $$ >/dev/null 2>&1; then HAVE_PS=1; else HAVE_PS=0; fi
 
 if [ ! -x "$B" ]; then
-    echo "找不到可执行文件或不可执行: $B（先执行 make）" >&2
+    echo "找不到可执行文件或不可执行: ${B}（先执行 make）" >&2
     exit 2
 fi
 
@@ -627,6 +628,127 @@ fi
 kill "$decoy" 2>/dev/null
 wait "$decoy" 2>/dev/null      # 不加 wait 的话 bash 会在下次提示符时打一行 "Terminated: 15"
 DECOY_PIDS=""
+
+# ---------- 16. 过热保护：critical 放手、降温后自动恢复 ----------
+echo
+echo "【16】过热保护（需 SMOKE_FULL=1 且 App 常驻，约 2 分钟）"
+# 与【13】【14】互补：那两条测「电量触底放手」，这条测「过热放手**并且降温后自己回来**」。
+# 实质差别正在这里：电量触底要改方案（持久），过热只停断言（瞬时）。
+# 若热保护照搬了电量那条「清方案」的路径，用户一次编译过热就会被永久抹掉合盖运行设置 ——
+# 所以「serious 不放手」与「降温后恢复」才是本用例真正的价值，而不是「会放手」。
+#
+# 判据读 App 自己的日志，**不依赖 ps**：要断言「哪条 caffeinate 是 App 持有的」必须用 ps，
+# 而本机 ps 被拒（受限环境不允许执行 setuid 程序），于是【13】【14】在这里只能跳过。
+# 日志通道不需要任何权限，所以这条用例在本机**真跑**，而不是又一个永远为绿的跳过项。
+# blog() 写的都是中文原文（不随界面语言变），因此 grep 中文是稳的。
+# 热状态没法真的构造出来，故用 _sim-thermal 仿真钩子；没有这个口子，断言只能永远为绿。
+# ⚠️ 前提与【13】相同：常驻的 App 必须是本次构建装上去的那份（先 make install）。
+APP_LOG="$SUP_DIR/LidKeep.log"
+if [ "${SMOKE_FULL:-0}" != "1" ]; then
+    skip_ "过热保护" "默认跳过，设 SMOKE_FULL=1 启用"
+elif [ "$has_service" -eq 0 ]; then
+    skip_ "过热保护" "热守卫由菜单栏 App 持有，需 App 常驻"
+elif [ ! -f "$APP_LOG" ]; then
+    skip_ "过热保护" "读不到 App 日志（${APP_LOG}）"
+else
+    printf '80,ac,charging' > "$SUP_DIR/_sim-battery"   # 让电量守卫彻底不插手
+    printf 'nominal'        > "$SUP_DIR/_sim-thermal"
+    base=$(wc -l < "$APP_LOG" 2>/dev/null | tr -d ' ')
+    "$B" plan --display-on on >/dev/null 2>&1
+    # 再开「息屏后保持唤醒」：它持有的是 caffeinate -is，与「保持屏幕常亮」不是同一条断言。
+    # 必须两条都装上，热保护漏放其中任何一条都能被测出来 —— 只装一条的话，
+    # 漏放的那条根本不在场，断言永远为绿。
+    "$B" plan --keep-awake on >/dev/null 2>&1
+    sleep 5
+    plan_before=$("$B" plan 2>/dev/null)
+    had_keepawake=0
+    newlog | grep -q "息屏后保持唤醒已生效" && had_keepawake=1
+    # 只看本次用例之后新增的行（日志按 256KB 轮转，两分钟内不可能转）
+    newlog() { tail -n +$((base + 1)) "$APP_LOG" 2>/dev/null; }
+    if ! newlog | grep -q "保持屏幕常亮已开启"; then
+        skip_ "过热保护" "常亮断言未装上（无可用亮度接口），热守卫无对象可管"
+    else
+        # ① serious 只提醒、不放手 —— 这一条守的是「分级」语义本身
+        printf 'serious' > "$SUP_DIR/_sim-thermal"
+        sleep 40
+        if ! newlog | grep -q "设备温度偏高"; then
+            bad "serious 已 40 秒，热守卫无反应（常驻的可能是旧版 App，请先 make install）"
+        elif newlog | grep -q "过热保护触发"; then
+            bad "serious 就放手了（应只在 critical 才放手）"
+        else
+            ok "serious 只提醒，不打断正在跑的任务（未放手）"
+        fi
+        # ② critical 放手
+        printf 'critical' > "$SUP_DIR/_sim-thermal"
+        released=0
+        for _ in $(seq 1 30); do
+            sleep 2
+            newlog | grep -q "过热保护触发" && { released=1; break; }
+        done
+        [ "$released" = "1" ] && ok "critical 时放手（机器得以降频散热）" \
+                              || bad "critical 已 60 秒，热守卫仍未放手"
+        # ②b 「息屏后保持唤醒」的 -is 断言必须一并放开。
+        # 单独立一条，是因为 releaseForThermal 曾经漏掉它：收尾那句 syncKeepAwake()
+        # 停不掉已经持有的断言（startKeepAwakeAssertion 开头 `guard keepCaff == nil`
+        # 直接早退），结果日志里「过热保护触发」赫然在列、通知也弹了，
+        # 机器却仍被 caffeinate -is 挡着不能睡 —— 热保护等于什么都没做。
+        # 不 ps 也能判：stopKeepAwakeAssertion() 会写这一条日志。
+        if [ "$had_keepawake" = "1" ]; then
+            if newlog | grep -q "息屏后保持唤醒已解除"; then
+                ok "「息屏后保持唤醒」的 -is 断言一并放开（不再挡着系统睡眠）"
+            else
+                bad "critical 已放手，但 -is 断言仍在（机器照样不能睡）"
+            fi
+        fi
+        # ③ 降温后自己回来 —— 热保护「只放不收」是这条用例专门要拦的回归
+        printf 'nominal' > "$SUP_DIR/_sim-thermal"
+        restored=0
+        for _ in $(seq 1 30); do
+            sleep 2
+            newlog | grep -q "设备温度已回落" && { restored=1; break; }
+        done
+        [ "$restored" = "1" ] && ok "降温后自动恢复，无需用户干预" \
+                              || bad "降温已 60 秒仍未恢复（热保护只放不收）"
+        # ④ 全程不许改动方案：热是瞬时状态，留持久痕迹就等于「编译热一次，合盖设置被永久关掉」
+        [ "$("$B" plan 2>/dev/null)" = "$plan_before" ] && ok "过热全程未改动任何方案设置" \
+                                                       || bad "热保护改写了方案（应只停断言、不动配置）"
+    fi
+    rm -f "$SUP_DIR/_sim-battery" "$SUP_DIR/_sim-thermal"
+    "$B" plan --display-on off >/dev/null 2>&1
+fi
+
+# ---------- 17. 脚本写法 ----------
+echo
+echo "【17】脚本写法（变量名后不得紧跟非 ASCII）"
+# 为什么单独立一条：macOS 自带的 /bin/bash 是 3.2，它会把紧贴变量名的多字节字符
+# 的字节吃进变量名 —— 变量后面紧跟一个全角括号，那个括号就会被算进变量名，于是
+# `set -u` 下直接报 unbound variable。而在 bash 4+ / zsh 里完全正常：交互式敲
+# 一遍看不出问题，只有真跑脚本才炸。这类「假绿灯」只能靠静态扫描拦下来。
+# 正解：写成 ${VAR} 形式，把变量边界写死。
+if command -v python3 >/dev/null 2>&1; then
+    GLUE=$(python3 - <<'PYEOF'
+import pathlib
+import re
+
+pat = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])')
+out = []
+for sub in ("dev-tools", "packaging"):
+    for p in sorted(pathlib.Path(sub).glob("*.sh")):
+        for i, ln in enumerate(p.read_text(encoding="utf-8").split("\n"), 1):
+            for m in pat.finditer(ln):
+                out.append(f"{p}:{i}: {m.group(0)}")
+print("\n".join(out))
+PYEOF
+)
+    if [ -z "$GLUE" ]; then
+        ok "所有脚本的变量引用都写了 \${VAR} 形式"
+    else
+        bad "有变量名紧跟非 ASCII 字符（bash 3.2 下会报 unbound variable）："
+        echo "$GLUE" | sed 's/^/      /'
+    fi
+else
+    skip_ "脚本写法" "未找到 python3"
+fi
 
 # ---------- 汇总 ----------
 echo
