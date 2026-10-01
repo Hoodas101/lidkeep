@@ -28,7 +28,7 @@
 | `autoNosleep` | Bool | `false` | 关屏时联动防睡眠（投影，真值在方案 `keepAwake`） |
 | `lidAwake` | Bool | `false` | 合盖不睡眠长期模式（投影，真值在方案 `lid`） |
 | `lidBlackout` | Bool | `true` | 合盖时熄灭内屏（独立开关） |
-| `lang` | String | `"auto"` | 界面语言：`auto`(跟随系统) / `zh` / `en` |
+| `lang` | String | `"auto"` | 界面语言：`auto`(跟随系统) / `zh` / `en` / `ja` / `ko` / `de` / `fr` / `es` |
 | `keepDisplayOn` | Bool | `false` | 保持屏幕常亮（投影，真值在方案 `displayOn`） |
 | `autoCheckUpdate` | Bool | `true` | 后台自动检查更新（节流 24h） |
 | `lastUpdateCheckAt` | Double | `0` | 上次自动检查的 Unix 时间戳（仅用于节流） |

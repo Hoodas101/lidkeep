@@ -9,6 +9,37 @@ renamed to LidKeep at v2.0.0 (CLI name, app name, and all bundle identifiers
 changed).
 
 ## [Unreleased]
+- **Seven UI languages.** Chinese, English, Japanese, Korean, German, French and
+  Spanish, 539 strings each at 100% coverage. Follows the system language; a
+  language outside the set falls back to English. Override with `LIDKEEP_LANG`
+  or `"lang"` in `config.json` (`auto` / `zh` / `en` / `ja` / `ko` / `de` /
+  `fr` / `es`). The long-form help text is still Chinese/English only.
+- **Thermal protection.** At `critical` thermal state the anti-sleep assertion is
+  released so the machine can throttle down and cool; `serious` only notifies.
+  Nothing is written to the config — heat is transient and must not leave a
+  persistent mark on the user's power plan.
+- **Notarization tooling.** `packaging/notarize.sh` rewritten with a `--dry-run`
+  mode that exercises signing → dmg/pkg/zip → self-check using ad-hoc +
+  hardened runtime, so failures surface before buying a Developer ID certificate.
+- **Fix:** `/bin/bash` on macOS is 3.2 and folds a following multibyte character
+  into the variable name (`$VER）` is read as `VER）`), which aborts under
+  `set -u`. Script variables are now written `${VAR}`; a smoke check guards it.
+- **Fix:** thermal protection now actually releases everything, and actually
+  leaves the config alone. Both defects were found by *running* it — the feature
+  had shipped untested, and every static check was green while it was broken:
+  - Stopping the lid daemon went through `lidkeep nosleep off`, which cleared
+    the persistent lid-awake flag **unconditionally**. The bar app's
+    `persist: false` only stops the parent from writing; it cannot stop its own
+    child. One hot compile therefore permanently dropped "keep awake when the
+    lid closes" — exactly what the feature promises never to do. The command now
+    accepts `--no-persist` and the thermal path passes it.
+  - The "stay awake after the display sleeps" assertion (`caffeinate -is`) was
+    never released at all: `syncKeepAwake()` early-returns when the assertion is
+    already held, so the guard logged the release, notified the user, and left
+    the machine blocked from sleeping. It is now stopped explicitly.
+  - The smoke test now holds *both* assertions so that releasing only one fails
+    the check, and it asserts the config is byte-identical across the whole
+    cycle.
 
 ## [2.2.3] — 2026-09-21
 - **Battery guard now covers "Keep the display on".** This was the only

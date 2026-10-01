@@ -25,6 +25,7 @@ Unlike true display sleep, LidKeep only cuts the backlight — the display never
 - [Usage](#usage)
 - [Anti-sleep (closed lid / battery / headless)](#anti-sleep-closed-lid--battery--headless)
 - [How it works](#how-it-works)
+- [Thermal protection](#thermal-protection)
 - [Language](#language)
 - [Details worth knowing](#details-worth-knowing)
 - [Requirements](#requirements)
@@ -242,11 +243,26 @@ Instead of letting macOS put the display to sleep (which kills the framebuffer a
 
 The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more (backlight off alone saves roughly 1–2 W, up to ~15–30% of a lightly loaded machine), but it makes remote frames unavailable. LidKeep keeps the machine fully remote-controllable.
 
+## Thermal protection
+
+A Mac held awake with the lid closed — in a bag, on a sofa — has nowhere left to put its heat. LidKeep reads `ProcessInfo.thermalState` (a public API, no permission of any kind) every 30 s and reacts in two tiers:
+
+| Thermal state | What LidKeep does |
+|---|---|
+| `serious` | Keeps everything running; notifies you once that macOS has started throttling |
+| `critical` | Releases every assertion (blackout, anti-sleep, display-on) so the machine can throttle down and cool |
+
+**Nothing is written to your config.** Heat is a transient state, so the moment it falls back to `nominal` / `fair` your power plan is re-applied exactly as you left it. This is the one place LidKeep deliberately does *not* copy the battery guard: a battery floor is a setting you meant to keep, a hot chassis is not. One long compile that nudges the machine into `critical` must never cost you your "keep awake when the lid closes" preference.
+
+There is no switch for it. The guard is unconditional, costs a single closure call every 30 s while idle, and exists because a released assertion is recoverable while a cooked machine is not.
+
 ## Language
 
-**Follows your system**: Chinese system language → Chinese UI; anything else (including English) → English UI. The menu bar app and the CLI always match — nothing to configure.
+**Follows your system**: seven languages ship with the app — Chinese, English, Japanese, Korean, German, French, and Spanish. Your system language picks one; a language that isn't among them falls back to English. The menu bar app and the CLI always match — nothing to configure.
 
-To switch it temporarily or permanently: `LIDKEEP_LANG=zh lidkeep doctor` (`zh` / `en`), or set `"lang": "zh"` in `~/Library/Application Support/LidKeep/config.json`. The config accepts `auto` (default) / `zh` / `en`, and the environment variable wins over it.
+To switch it temporarily or permanently: `LIDKEEP_LANG=en lidkeep doctor`, or set `"lang": "en"` in `~/Library/Application Support/LidKeep/config.json`. The config accepts `auto` (default) / `zh` / `en` / `ja` / `ko` / `de` / `fr` / `es`, and the environment variable wins over it.
+
+The long-form help text is written in Chinese and English only; every other language gets the English version rather than Chinese you may not read.
 
 ## Details worth knowing
 
@@ -311,6 +327,7 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 ## Known limitations
 
 - **External monitors may stay lit.** Blackout dims through the software brightness API, which most HDMI/DVI/DisplayPort panels don't expose. The built-in display goes fully dark; `lidkeep doctor` names any that don't. (Real display sleep would fix them, but it kills remote frames — deliberately avoided.)
+- **The thermal guard only releases what it can restore.** It lets go of the blackout, anti-sleep, display-on and the lid daemon your power plan owns — all of which come back on their own once the machine cools. A daemon *you* started by hand with `lidkeep nosleep on --system` is left running on purpose: the guard has no way to know you wanted it back, so stopping it would trade a hot machine for a setting you can never recover.
 - **It's not a lock screen.** The machine stays fully usable to anyone at the keyboard — they just can't see it. Lock with ⌃⌘Q.
 
 ## Support this project
