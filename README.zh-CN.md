@@ -146,7 +146,7 @@ gh attestation verify lidkeep-macos.zip -R Hoodas101/lidkeep   # 验证构建来
 在 Release 链接前加 `https://gh-proxy.com/` 走镜像。已实测与官方产物**逐字节一致**（SHA-256 相符、长度完整），约 **173 KB/s**：
 
 ```bash
-V=2.2.3
+V=2.2.5
 curl -L -O "https://gh-proxy.com/https://github.com/Hoodas101/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # 必须与 Release 的 SHA256SUMS 一致
 ```

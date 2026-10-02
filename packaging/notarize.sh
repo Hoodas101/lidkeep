@@ -7,8 +7,8 @@
 # 走完公证后，上面这些步骤全部消失，变成普通双击。
 #
 # 用法：
-#   ./packaging/notarize.sh 2.2.3              # 正式公证（需证书 + 凭据）
-#   ./packaging/notarize.sh 2.2.3 --dry-run    # 只验链路：ad-hoc + hardened runtime，不提交
+#   ./packaging/notarize.sh 2.2.5              # 正式公证（需证书 + 凭据）
+#   ./packaging/notarize.sh 2.2.5 --dry-run    # 只验链路：ad-hoc + hardened runtime，不提交
 #
 # --dry-run 不是玩具：它用和正式模式**完全相同**的签名参数（ad-hoc 无时间戳服务器，
 # 故 --timestamp 除外）走完整条打包链路，把「重签 → 打包 dmg/pkg/zip → 产物自检」
@@ -35,7 +35,7 @@
 #   APPLE_ID=you@example.com \
 #   APPLE_ID_PASSWORD=xxxx-xxxx-xxxx-xxxx \
 #   TEAM_ID=ABCDE12345 \
-#   ./packaging/notarize.sh 2.2.3
+#   ./packaging/notarize.sh 2.2.5
 #
 # ⚠️ 步骤顺序不是随意的，每一步的注释都写明了为什么必须是这个顺序。
 #
@@ -55,7 +55,7 @@ for arg in "$@"; do
         *)  VER="$arg" ;;
     esac
 done
-[ -n "$VER" ] || { echo "用法: notarize.sh <版本号, 如 2.2.3> [--dry-run]" >&2; exit 2; }
+[ -n "$VER" ] || { echo "用法: notarize.sh <版本号, 如 2.2.5> [--dry-run]" >&2; exit 2; }
 VER="${VER#v}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

@@ -9,6 +9,8 @@ renamed to LidKeep at v2.0.0 (CLI name, app name, and all bundle identifiers
 changed).
 
 ## [Unreleased]
+
+## [2.2.5] — 2026-10-02
 - **Seven UI languages.** Chinese, English, Japanese, Korean, German, French and
   Spanish, 539 strings each at 100% coverage. Follows the system language; a
   language outside the set falls back to English. Override with `LIDKEEP_LANG`
@@ -134,7 +136,8 @@ changed).
 ## [1.1.0] — 2026-09-08
 - Initial release: blank the display while keeping the Mac awake.
 
-[Unreleased]: ../../compare/v2.2.3...HEAD
+[Unreleased]: ../../compare/v2.2.5...HEAD
+[2.2.5]: ../../compare/v2.2.3...v2.2.5
 [2.2.3]: ../../compare/v2.2.2...v2.2.3
 [2.2.2]: ../../compare/v2.2.1...v2.2.2
 [2.2.1]: ../../compare/v2.2.0...v2.2.1

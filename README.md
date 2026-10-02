@@ -146,7 +146,7 @@ gh attestation verify lidkeep-macos.zip -R Hoodas101/lidkeep   # built by this r
 Prefix a release URL with `https://gh-proxy.com/` to route the download through a mirror. This was verified byte-identical to the official artifact (matching SHA-256, full length) at roughly **173 KB/s**:
 
 ```bash
-V=2.2.3
+V=2.2.5
 curl -L -O "https://gh-proxy.com/https://github.com/Hoodas101/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # must match SHA256SUMS from the release
 ```
