@@ -85,7 +85,7 @@ The difference comes down to one thing: **LidKeep only cuts the backlight; it ne
 | **Keep the display on** | Display never sleeps on its own | uses more power |
 | **When the lid closes** | `Sleep` (system default) or `Keep awake` (keeps running, built-in panel off) | "Keep awake" needs the privileged helper; plug in if you can |
 
-They are not mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both. **Stay awake after the display sleeps** holds its own anti-sleep assertion from the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own. If a plan cannot take effect right now (helper missing, battery below the floor), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten.
+They are not mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both. **Stay awake after the display sleeps** holds its own anti-sleep assertion from the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own. If a plan cannot take effect right now (helper missing, battery below the floor, or the machine is too hot), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten, not even by thermal protection.
 
 ## Three ways people actually use it
 
@@ -132,7 +132,7 @@ xattr -dr com.apple.quarantine /Applications/LidKeep.app
 
 (After a manual `.dmg`/`.pkg` download you can instead right-click it → **Open** and confirm once.)
 
-**The real fix is notarization** — Developer ID signing plus a notarization ticket. Once that lands, every path above becomes a plain double-click, and it is the top priority for the next release. In the meantime each release publishes `SHA256SUMS` and GitHub build-provenance attestations, so you can verify that what you downloaded came from this repository:
+**The real fix is notarization** — Developer ID signing plus a notarization ticket. The pipeline is already in place (`packaging/notarize.sh`, with a `--dry-run` mode that exercises the whole chain on an ad-hoc signature); what is missing is a paid Developer ID membership. Once that lands, every path above becomes a plain double-click. In the meantime each release publishes `SHA256SUMS` and GitHub build-provenance attestations, so you can verify that what you downloaded came from this repository:
 
 ```bash
 shasum -a 256 -c SHA256SUMS                                  # bytes match what was published
@@ -314,7 +314,7 @@ Source layout (Swift requires the top-level file to be named `main.swift`, so ea
 - `Sources/CLI/main.swift` — command-line tool
 - `Sources/Bar/main.swift` — menu bar app
 - `Sources/Shared/` — the **single implementation** both targets compile (config model, system state and brightness, power plans, process ownership, localization, version)
-- `dev-tools/` — helpers plus `smoke.sh` and the `check-l10n.py` copy guard
+- `dev-tools/` — helpers plus `smoke.sh`, the `check-l10n.py` copy guard, and `audit-l10n-concat.py` (flags translated fragments that would glue together wrong — missing spaces, mismatched quotes)
 
 `make test` skips cases the current environment can't run (e.g. it won't do a real blackout while the menu bar app is live, since that would interrupt your session). Set `SMOKE_FULL=1` to force it.
 
