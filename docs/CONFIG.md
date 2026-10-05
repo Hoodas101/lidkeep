@@ -1,17 +1,19 @@
 # LidKeep 配置参考（config.json）
 
+> 本文档目前**只有中文版**（English version pending）。字段名、命令行参数与 JSON 结构在两种语言下完全一致，必要时可对照 [DETAILS.md](DETAILS.md)。
+
 配置文件位于：
 
 ```
 ~/Library/Application Support/LidKeep/config.json
 ```
 
-菜单栏 App 与 CLI **共写同一份**文件。它使用逐字段容错解析——单个字段缺失或损坏只会退回默认值，不会让整份配置解析失败（那样会连热键、电量下限一起被重置）。
+菜单栏 App 与 CLI **共写同一份**文件。它使用逐字段容错解析：单个字段缺失或损坏只会退回默认值，不会让整份配置解析失败（那样会连热键、电量下限一起被重置）。
 
 > **重要心智模型：电源方案是真值，三个布尔是「投影」。**
 > `planAC` / `planBattery`（每个都是一个 `PowerPlan`）是你真正保存下来的东西。
 > `autoNosleep` / `lidAwake` / `keepDisplayOn` 只是「当前电源来源那套方案」的派生值，
-> **不单独持久化**。改耗电行为请走 `lidkeep plan`（或直接编辑方案），不要只改投影布尔——
+> **不单独持久化**。改耗电行为请走 `lidkeep plan`（或直接编辑方案），不要只改投影布尔：
 > 周期性的方案重算会把投影重新算回去，你的改动会被无声抹掉。
 
 ## 顶层字段
@@ -45,9 +47,9 @@
 | `MOD_ALT` | `1 << 19` | ⌥ |
 | `MOD_CMD` | `1 << 20` | ⌘ |
 
-组合时按位或，例如 `⌃⌥⌘` = `MOD_CTRL | MOD_ALT | MOD_CMD` = `(1<<18)|(1<<19)|(1<<20)` = `[` → 数值 `917504`。
+组合时按位或，例如 `⌃⌥⌘` = `MOD_CTRL | MOD_ALT | MOD_CMD` = `(1<<18)|(1<<19)|(1<<20)` = 262144|524288|1048576 = 数值 `1835008`。
 
-全局热键**必须至少包含一个修饰键**——macOS 拒绝无修饰键的全局热键。
+全局热键**必须至少包含一个修饰键**；macOS 拒绝无修饰键的全局热键。
 
 ### `batteryAction`（触底动作）
 
@@ -82,7 +84,7 @@ lidkeep plan --keep-awake on               # 不加 --ac/--battery = 同时改�
 ```
 
 **2. 手写 JSON（仅当你知道自己在做什么）：** 直接编辑 `planAC` / `planBattery`，
-不要只改 `autoNosleep` / `lidAwake` / `keepDisplayOn` 这三个投影——它们会被周期重算覆盖。
+不要只改 `autoNosleep` / `lidAwake` / `keepDisplayOn` 这三个投影，它们会被周期重算覆盖。
 改完保存即可，App/CLI 会重载。
 
 ## 示例：始终接电、合盖保持唤醒、电池时老实睡觉
@@ -95,7 +97,7 @@ lidkeep plan --keep-awake on               # 不加 --ac/--battery = 同时改�
   "batteryAction": 0,
   "hotkeyEnabled": true,
   "keyCode": 11,
-  "modFlags": 917504
+  "modFlags": 1835008
 }
 ```
 

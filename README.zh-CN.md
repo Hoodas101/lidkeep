@@ -13,7 +13,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/Hoodas101/lidkeep/build.yml?label=build)](../../actions/workflows/build.yml)
 
-English: [README.md](README.md) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全](SECURITY.md)
+[English README](README.md) · [更新日志](CHANGELOG.md)（英文） · [贡献指南](CONTRIBUTING.md)（英文） · [安全策略](SECURITY.md)（英文）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
@@ -49,7 +49,7 @@ macOS 把两件事捆在了一起：屏幕灭掉，机器也跟着睡。可多�
 
 ## 怎么用
 
-菜单栏就两个入口。
+日常只用其中两个，其余都在**设置…**里和菜单底部。
 
 | 菜单项 | 作用 |
 |---|---|
@@ -77,6 +77,19 @@ lidkeep nosleep setup          # 一条命令装好提权助手并开启防睡�
 ```bash
 xattr -dr com.apple.quarantine /Applications/LidKeep.app
 ```
+
+## 卸载
+
+先退出 LidKeep，然后删掉 App、CLI 和登录项：
+
+```bash
+rm -rf /Applications/LidKeep.app
+rm -f /opt/homebrew/bin/lidkeep /usr/local/bin/lidkeep ~/.local/bin/lidkeep
+rm -f ~/Library/LaunchAgents/com.lidkeep.*.plist
+rm -rf ~/Library/Application\ Support/LidKeep   # 可选：连同热键与电源方案一起清掉
+```
+
+有克隆的话，`./uninstall.sh` 做掉前三步。菜单里的**卸载提权助手**只移除提权助手，不是卸载 App。
 
 ## 环境要求
 

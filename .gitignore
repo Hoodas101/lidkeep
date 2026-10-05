@@ -29,3 +29,6 @@ Sources/Shared/Version.swift
 # 推广素材采集的中间产物：整屏截图与录屏含完整桌面内容，绝不入库
 # （成品 menu.png / settings.png / demo.gif 是裁剪过的，正常提交）
 docs/promo/.*
+
+# CI 生成的 release 正文（由 CHANGELOG.md 抽取）
+RELEASE_NOTES.md

@@ -16,7 +16,7 @@ propose changes.
     shared belongs there.
   - **Plans are the source of truth; the three booleans are projections.**
     `planAC` / `planBattery` (each a `PowerPlan`) are what gets persisted.
-    `autoNosleep` / `keepAwake` / `lidAwake` are *derived* "what the active
+    `autoNosleep` / `keepDisplayOn` / `lidAwake` are *derived* "what the active
     power source's plan says right now" — they are never persisted on their own.
     If you change a power behavior, change the plan, not just a projection, or a
     periodic re-sync will silently undo your change.
@@ -32,6 +32,9 @@ make            # == make all
 
 # 3. Run the end-to-end smoke test
 make test       # skips cases that would interrupt your live session
+
+# 4. Optional: build and install in one step (app + CLI)
+./install.sh              # or: ./install.sh --cli-only, to skip the app
 ```
 
 > **Heads-up:** `make all` rewrites `Sources/Info.plist` in place to stamp the
@@ -70,19 +73,54 @@ code or the test.
 
 ## Localization
 
-All user-facing strings live in `Sources/Shared/L10n.swift` as a `zh → en` table
-looked up by `L(_:)`. `dev-tools/check-l10n.py` enforces bidirectional parity
-(no missing translation, no dead key) and must pass. Always run it after
-touching strings:
+Seven languages ship: `zh` (source), `en`, `ja`, `ko`, `de`, `fr`, `es`.
+
+**Chinese is the source language, and the Chinese string *is* the key.** Call
+sites read `L("关闭显示器")`; `Sources/Shared/L10n.swift` is the lookup engine
+(it holds no translations) and each `L10nXX.swift` holds one language's table.
+Lookup degrades in three steps — current language → English → the Chinese key —
+so a missing entry shows Chinese rather than a blank or a leaked key.
+
+**Adding one string therefore means adding it to six files.** Two guards cover
+this:
 
 ```bash
-python3 dev-tools/check-l10n.py .
+make test        # check-l10n.py (blocking) + smoke.sh
+make l10n-audit  # audit-l10n-concat.py — run by hand after touching strings
 ```
+
+`check-l10n.py` blocks on the four structural errors (call site missing from the
+table, dead key, orphan key, duplicate key) plus a fifth: **a translation that is
+byte-identical to its Chinese key**, which is almost always untranslated. A few
+entries are genuinely identical — full-width punctuation, the shared kanji in
+「秒」, the ideographic space Japanese uses for alignment — and those live in the
+`SAME_OK` whitelist at the top of the script. Adding to that whitelist is a
+deliberate act with a written reason, not a way to silence the check.
+
+`audit-l10n-concat.py` catches the other class of defect: keys are *fragments*
+joined with `+`, so a Latin-script translation can glue together
+(`power;on battery`) or push a bracket to the wrong side. Chinese hides this
+completely, which is why it needs a tool of its own. It stays out of `make test`
+because its last section needs a human eye.
+
+If you can't read a language you're adding a string for, write the English entry
+and say so in the PR — a rough guess in six languages is harder to fix later
+than an honest gap.
+
+## A note on the code comments
+
+Comments in `Sources/` are **mostly Chinese** (roughly 9 in 10) — that is the
+maintainer's working language, and translating every comment is not a goal.
+`Sources/Shared/` is the part worth reading no matter what language you speak
+(it is the single implementation both targets compile), so comment there in
+English if you're adding to it. Elsewhere, English comments are welcome but
+never required.
 
 ## Signing / packaging
 
 - Releases are **ad-hoc signed, not notarized** (no paid Apple Developer cert
-  behind this project). See the README "Unsigned" section for the user impact.
+  behind this project). See the "One manual step" note under **Install** in the
+  README for the user impact.
 - `make all` runs `codesign --deep`. There is a known self-lock: if a leftover
   `*.cstemp*` sits in `Contents/MacOS/`, `--deep` re-fails every time and the
   Makefile's `2>/dev/null` swallows the error. The Makefile now cleans that

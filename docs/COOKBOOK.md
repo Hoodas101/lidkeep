@@ -1,5 +1,7 @@
 # 自动化配方（Cookbook）
 
+> 本文档目前**只有中文版**（English version pending）。里面的命令都是普通 shell，语言无关；命令本身的英文说明见 [DETAILS.md](DETAILS.md)。
+
 LidKeep 的 CLI 是普通命令行工具，因此可以被任何能跑 shell 的自动化接入：
 快捷指令、SSH 远程脚本、LaunchAgent、Home Assistant、CI 等。下面是一组可直接套用的配方。
 
@@ -49,7 +51,7 @@ ssh mac@home "lidkeep status"
 ```bash
 # 接电时：合盖保持唤醒
 lidkeep plan --ac --lid nothing
-# 想要更稳（电池+合盖也覆盖）需要先装特权 helper：
+# 想要更稳（电池+合盖也覆盖）需要先装提权助手：
 #   sudo lidkeep nosleep install-helper
 #   lidkeep nosleep on --system
 ```
@@ -101,7 +103,7 @@ sensor:
 
 LidKeep 的「保持屏幕常亮」(`keepDisplayOn`，`caffeinate -d`) 适合「屏幕必须整夜亮着」
 的场景（如投屏演示）。若你只是想阻止系统睡眠而屏幕可以熄，`lidkeep off` + 方案里的
-`keepAwake` 更省电。两种都可以和 `caffeinate` 叠加，不会冲突——LidKeep 持有的是
+`keepAwake` 更省电。两种都可以和 `caffeinate` 叠加，不会冲突，LidKeep 持有的是
 自己名下的断言，并带 owner accounting，不会误关别人的断言。
 
 ---
@@ -115,4 +117,4 @@ LIDKEEP_LANG=zh lidkeep doctor   # 强制中文输出（调试时方便对照）
 ```
 
 如果 `disablesleep` 被某远程控制软件（ToDesk / UURemote / TeamViewer）占用，
-`doctor` 会明确说「被远程软件持有」，而不是把它当残留让你去修——这种情况是正常的。
+`doctor` 会明确说「被远程软件持有」，而不是把它当残留让你去修，这种情况是正常的。

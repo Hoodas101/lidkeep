@@ -13,7 +13,7 @@ That is not the same thing as display sleep. LidKeep cuts the backlight only; th
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/Hoodas101/lidkeep/build.yml?label=build)](../../actions/workflows/build.yml)
 
-中文: [README.zh-CN.md](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+[中文 README](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
@@ -49,7 +49,7 @@ macOS ties two things together: turning the display off, and putting the system 
 
 ## Using it
 
-There are only two menu items.
+Day to day you only touch two of them; the rest live in **Settings…** and the bottom of the menu.
 
 | Menu item | What it does |
 |---|---|
@@ -78,13 +78,26 @@ The one-liner above fetches the latest release, verifies `SHA256SUMS`, installs 
 xattr -dr com.apple.quarantine /Applications/LidKeep.app
 ```
 
+## Uninstall
+
+Quit LidKeep, then remove the app, the CLI and the login item:
+
+```bash
+rm -rf /Applications/LidKeep.app
+rm -f /opt/homebrew/bin/lidkeep /usr/local/bin/lidkeep ~/.local/bin/lidkeep
+rm -f ~/Library/LaunchAgents/com.lidkeep.*.plist
+rm -rf ~/Library/Application\ Support/LidKeep   # optional: also drops your hotkey and power plans
+```
+
+From a clone, `./uninstall.sh` covers the first three. The menu's **Uninstall Privileged Helper** removes the helper only, not the app.
+
 ## Requirements
 
 macOS 13 Ventura or later (universal binary: Apple Silicon + Intel), plus a built-in display to black out. External monitors generally don't expose software brightness.
 
 ## Docs
 
-**[DETAILS.md](docs/DETAILS.md)** has every command, the anti-sleep and privileged helper, how it works, thermal protection and the FAQ. **[CONFIG.md](docs/CONFIG.md)** documents every config field; **[COOKBOOK.md](docs/COOKBOOK.md)** has ready-made recipes.
+**[DETAILS.md](docs/DETAILS.md)** has every command, the anti-sleep and privileged helper, how it works, thermal protection and the FAQ. Two companion docs are **Chinese only** for now: **[CONFIG.md](docs/CONFIG.md)** documents every config field, and **[COOKBOOK.md](docs/COOKBOOK.md)** has ready-made recipes; the [中文 README](README.zh-CN.md) links to the same pair.
 
 ## Support
 

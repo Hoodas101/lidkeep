@@ -1,7 +1,7 @@
 # LidKeep — 完整说明
 
 This is the long-form companion to [README.md](../README.md). If you only want to
-install it and turn the screen off, the README is enough — come back here for the
+install it and turn the screen off, the README is enough. Come back here for the
 full command list, the anti-sleep and privileged-helper design, the measured
 behavior behind the brightness trick, thermal protection, FAQ and development.
 
@@ -21,13 +21,13 @@ behavior behind the brightness trick, thermal protection, FAQ and development.
 
 ## Usage
 
-**Menu bar app** — click ☀ / 🌙 in the menu bar:
+**Menu bar app**: click ☀ / 🌙 in the menu bar:
 
-- **Turn Display Off** — black out now, machine keeps running (click again or press the hotkey to restore)
-- **Status: … ▸** — the title *is* the current status (e.g. `Status: Power · Keep awake`), and it edits whichever plan is active right now
-- **Install Privileged Helper (first run)…** — lets "When the lid closes ▸ Keep awake" cover battery and lid (one password prompt)
-- **Settings…** — four tabs: General / Hotkey / Battery / Other
-- **Hotkey Self-test** — synthesizes your hotkey once and verifies the delivery path (no side effects)
+- **Turn Display Off**: black out now, machine keeps running (click again or press the hotkey to restore)
+- **Status: … ▸**: the title *is* the current status (e.g. `Status: Power · Keep awake`), and it edits whichever plan is active right now
+- **Install Privileged Helper (first use)…**: lets "When the lid closes ▸ Keep awake" cover battery and lid (one password prompt)
+- **Settings…**: four tabs: General / Hotkey / Battery / Other
+- **Hotkey Self-test**: synthesizes your hotkey once and verifies the delivery path (no side effects)
 - **Open Log**
 
 The four settings tabs cover: **General** (both power plans side by side, restore brightness, blank the display when the lid closes), **Hotkey** (record any combination, enable/disable the global hotkey, fallback timeout), **Battery** (custom floor + what happens when it is hit), and **Other** (launch at login, automatic update checks, safety note).
@@ -107,7 +107,7 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more (backlig
 
 ## Thermal protection
 
-A Mac held awake with the lid closed — in a bag, on a sofa — has nowhere left to put its heat. LidKeep reads `ProcessInfo.thermalState` (a public API, no permission of any kind) every 30 s and reacts in two tiers:
+A Mac held awake with the lid closed, in a bag or on a sofa, has nowhere left to put its heat. LidKeep reads `ProcessInfo.thermalState` (a public API, no permission of any kind) every 30 s and reacts in two tiers:
 
 | Thermal state | What LidKeep does |
 |---|---|
@@ -147,13 +147,13 @@ The long-form help text is written in Chinese and English only; every other lang
 
 **Does an auto-brightness sensor fight the blackout?** The app re-asserts brightness 0 twice a second, so ambient-light changes won't light the screen up.
 
-**Why not just `pmset displaysleepnow`?** True display sleep tears down the framebuffer — remote viewers get nothing. Many apps (browsers, Electron apps) also hold `NoDisplaySleepAssertion`, which blocks display sleep entirely. Brightness-zeroing works everywhere and is the only method that keeps remote frames flowing.
+**Why not just `pmset displaysleepnow`?** True display sleep tears down the framebuffer, so remote viewers get nothing. Many apps (browsers, Electron apps) also hold `NoDisplaySleepAssertion`, which blocks display sleep entirely. Brightness-zeroing works everywhere and is the only method that keeps remote frames flowing.
 
 **Does it work over SSH, or when the screen is locked?** Yes. The CLI (`lidkeep off/on/status`) runs over SSH, and locking the screen (⌃⌘Q) is separate from the display's brightness state — blackout and anti-sleep keep working whether the screen is locked or not.
 
 **Headless Mac (Mac mini with no built-in display)?** There's no backlight to cut, so blackout has nothing to do; but `lidkeep nosleep` still keeps the machine awake for remote access and downloads, which is the usual reason to run one headless.
 
-**Does it clash with Focus, Do Not Disturb, or Night Shift?** No — those are unrelated subsystems. Blackout only sets brightness to 0 and holds a `caffeinate` assertion; it never touches notification, focus, or color settings.
+**Does it clash with Focus, Do Not Disturb, or Night Shift?** No. Those are unrelated subsystems. Blackout only sets brightness to 0 and holds a `caffeinate` assertion; it never touches notification, focus, or color settings.
 
 ## Uninstall
 
@@ -161,6 +161,11 @@ The long-form help text is written in Chinese and English only; every other lang
 ./uninstall.sh           # or: make uninstall
 # config/logs (optional): rm -rf ~/Library/Application\ Support/LidKeep
 ```
+
+Installed from the one-liner, with no clone on disk? Do the four removals by hand —
+see [the README's Uninstall section](../README.md#uninstall).
+The menu's **Uninstall Privileged Helper** removes the helper only; it is **not** an
+app uninstaller.
 
 ## Development
 
@@ -173,21 +178,21 @@ make clean
 
 Source layout (Swift requires the top-level file to be named `main.swift`, so each target gets its own directory):
 
-- `Sources/CLI/main.swift` — command-line tool
-- `Sources/Bar/main.swift` — menu bar app
-- `Sources/Shared/` — the **single implementation** both targets compile (config model, system state and brightness, power plans, process ownership, localization, version)
-- `dev-tools/` — helpers plus `smoke.sh`, the `check-l10n.py` copy guard, and `audit-l10n-concat.py` (flags translated fragments that would glue together wrong — missing spaces, mismatched quotes)
+- `Sources/CLI/main.swift`: command-line tool
+- `Sources/Bar/main.swift`: menu bar app
+- `Sources/Shared/`: the **single implementation** both targets compile (config model, system state and brightness, power plans, process ownership, localization, version)
+- `dev-tools/`: helpers plus `smoke.sh`, the `check-l10n.py` copy guard, and `audit-l10n-concat.py` (flags translated fragments that would glue together wrong — missing spaces, mismatched quotes)
 
 `make test` skips cases the current environment can't run (e.g. it won't do a real blackout while the menu bar app is live, since that would interrupt your session). Set `SMOKE_FULL=1` to force it.
 
 **Build requirements:** macOS 13+ with Xcode Command Line Tools (`xcode-select --install`). The Swift toolchain they provide is the only dependency; there are no third-party packages. A universal binary (Apple Silicon + Intel) is built by default.
 
-> **Note — `make all` rewrites `Sources/Info.plist` in place.** It stamps the version from the latest git tag into the `<!--VERSION-->` placeholder, so after a build `git status` will show `Sources/Info.plist` as modified. This is how the version number stays in sync with tags; commit it as part of a release (don't fight it).
+> **Note:** `make all` rewrites `Sources/Info.plist` in place.** It stamps the version from the latest git tag into the `<!--VERSION-->` placeholder, so after a build `git status` will show `Sources/Info.plist` as modified. This is how the version number stays in sync with tags; commit it as part of a release (don't fight it).
 
-**Promo assets (screenshots / demo GIF):** they are *not* committed — generate them locally with `./dev-tools/capture-promo.sh` (menu / settings / `settings-win` / gif). The script leaves a countdown so you can arrange the UI; `settings-win` captures the settings window by its window ID so there is no manual cropping. The raw full-screen frames contain your desktop and are git-ignored.
+**Promo assets (screenshots / demo GIF):** they are *not* committed; generate them locally with `./dev-tools/capture-promo.sh` (menu / settings / `settings-win` / gif). The script leaves a countdown so you can arrange the UI; `settings-win` captures the settings window by its window ID so there is no manual cropping. The raw full-screen frames contain your desktop and are git-ignored.
 
 ## Known limitations
 
 - **External monitors may stay lit.** Blackout dims through the software brightness API, which most HDMI/DVI/DisplayPort panels don't expose. The built-in display goes fully dark; `lidkeep doctor` names any that don't. (Real display sleep would fix them, but it kills remote frames — deliberately avoided.)
 - **The thermal guard only releases what it can restore.** It lets go of the blackout, anti-sleep, display-on and the lid daemon your power plan owns — all of which come back on their own once the machine cools. A daemon *you* started by hand with `lidkeep nosleep on --system` is left running on purpose: the guard has no way to know you wanted it back, so stopping it would trade a hot machine for a setting you can never recover.
-- **It's not a lock screen.** The machine stays fully usable to anyone at the keyboard — they just can't see it. Lock with ⌃⌘Q.
+- **It's not a lock screen.** The machine stays fully usable to anyone at the keyboard; they just can't see it. Lock with ⌃⌘Q.

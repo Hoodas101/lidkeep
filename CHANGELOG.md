@@ -10,7 +10,7 @@ changed).
 
 ## [Unreleased]
 
-## [2.2.5] — 2026-10-02
+## [2.2.5] - 2026-10-02
 - **Seven UI languages.** Chinese, English, Japanese, Korean, German, French and
   Spanish, 539 strings each at 100% coverage. Follows the system language; a
   language outside the set falls back to English. Override with `LIDKEEP_LANG`
@@ -43,7 +43,7 @@ changed).
     the check, and it asserts the config is byte-identical across the whole
     cycle.
 
-## [2.2.3] — 2026-09-21
+## [2.2.3] - 2026-09-21
 - **Battery guard now covers "Keep the display on".** This was the only
   power-draining path the floor check missed — a laptop on battery with the
   screen forced on would drain to a hard shutdown. The floor now refuses to
@@ -64,76 +64,76 @@ changed).
 - Internals: removed dead code, tightened comments, added a smoke test for the
   always-on-display battery release.
 
-## [2.2.2] — 2026-09-16
+## [2.2.2] - 2026-09-16
 - Per-power-source plans (plugged-in vs battery), compact status line, one
   shared core compiled by both targets.
 - Added donation QR codes (WeChat / Alipay).
 
-## [2.2.1] — 2026-09-12
+## [2.2.1] - 2026-09-12
 - Rebuilt settings panel with recordable hotkey and custom battery floor /
   battery action.
 - One-line installer for machines without Xcode.
 
-## [2.2.0] — 2026-09-11
+## [2.2.0] - 2026-09-11
 - Automatic update checks; dropped the v1.x rename compatibility layer.
 
-## [2.1.0] — 2026-09-11
+## [2.1.0] - 2026-09-11
 - "Check for Updates", About panel, and GitHub link in the menu.
 
-## [2.0.0] — 2026-09-11
+## [2.0.0] - 2026-09-11
 - **Renamed to LidKeep** and redesigned the app icon. Breaking: CLI/app/bundle
   identifiers changed; v1.x state is not migrated.
 
-## [1.6.5] — 2026-09-11
+## [1.6.5] - 2026-09-11
 - Exclusive power modes, visible power assertions, atomic config writes.
 
-## [1.6.4] — 2026-09-11
+## [1.6.4] - 2026-09-11
 - Lid blackout gets its own switch; icon redesigned.
 
-## [1.6.3] — 2026-09-11
+## [1.6.3] - 2026-09-11
 - Made lid blackout actually survive closing the lid.
 
-## [1.6.2] — 2026-09-11
+## [1.6.2] - 2026-09-11
 - Original app icon that reads clearly at every size.
 
-## [1.6.1] — 2026-09-10
+## [1.6.1] - 2026-09-10
 - Fall back to English when the system language is neither Chinese nor English.
 
-## [1.6.0] — 2026-09-10
+## [1.6.0] - 2026-09-10
 - English/Chinese UI that follows the system language.
 
-## [1.5.2] — 2026-09-10
+## [1.5.2] - 2026-09-10
 - Recognize remote-control apps holding `disablesleep`; auto blackout of the
   built-in display on lid close during anti-sleep.
 
-## [1.5.1] — 2026-09-10
+## [1.5.1] - 2026-09-10
 - Rewrote menu wording around the three core functions.
 
-## [1.5.0] — 2026-09-10
+## [1.5.0] - 2026-09-10
 - One-click lid-closed anti-sleep long-running mode in the menu bar app.
 
-## [1.4.0] — 2026-09-10
+## [1.4.0] - 2026-09-10
 - Multi-display blackout, `disablesleep` owner accounting, `doctor`/`version`/
   `toggle`, smoke tests.
 
-## [1.3.2] — 2026-09-09
+## [1.3.2] - 2026-09-09
 - Drag-and-drop `.dmg` alongside the `.pkg` installer.
 
-## [1.3.1] — 2026-09-09
+## [1.3.1] - 2026-09-09
 - One-click `nosleep setup`; fixed helper detection for non-root users.
 
-## [1.3.0] — 2026-09-09
+## [1.3.0] - 2026-09-09
 - Anti-sleep (`nosleep`): keep the machine awake during blackout, incl. lid
   closed / on battery.
 
-## [1.2.0] — 2026-09-09
+## [1.2.0] - 2026-09-09
 - Battery guard, visible failures, release checksums, `.pkg` installer.
 
-## [1.1.1] — 2026-09-08
+## [1.1.1] - 2026-09-08
 - Fixed stuck-black screen, `caffeinate` orphans, pid reuse; auto-detect
   Homebrew prefix (Apple Silicon vs Intel).
 
-## [1.1.0] — 2026-09-08
+## [1.1.0] - 2026-09-08
 - Initial release: blank the display while keeping the Mac awake.
 
 [Unreleased]: ../../compare/v2.2.5...HEAD
