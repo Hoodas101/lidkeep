@@ -10,6 +10,28 @@ changed).
 
 ## [Unreleased]
 
+- **Uninstall instructions.** The README now has an `## Uninstall` section for
+  the common case: installed from the one-liner, no clone on disk. The installer
+  used to tell you to "use the menu item", but that item only removes the
+  privileged helper, and the README section it pointed at did not exist.
+- **Fix:** `install-remote.sh --help` printed a stray `set -u` line — the usage
+  text was sliced with hard-coded line numbers, so it broke the moment the
+  header comment got shorter. It now stops at the end of the comment block.
+- **Fix:** the installer's fallback version was pinned at 2.2.2. When the
+  version lookup failed (rate limit, offline, CN network) it silently installed
+  an old release. Bumped, and the release workflow now fails if the pinned
+  value and the tag ever drift apart.
+- Localization: `check-l10n.py` **fails** on a translation that is byte-identical
+  to its Chinese key, instead of only warning — "untranslated=10" used to pass
+  CI. The two Japanese/Korean entries that really were untranslated are fixed;
+  entries that are legitimately identical live in an explicit whitelist.
+  `make l10n-audit` now exposes the concatenation audit, which until now had no
+  entry point outside the docs.
+- Docs: corrected the `modFlags` value for `⌃⌥⌘` (917504 was ⇧⌃⌥), removed a
+  CONTRIBUTING reference to a README section that does not exist, refreshed the
+  localization notes, restored the two known limitations missing from the Chinese
+  DETAILS, and noted which companion docs are Chinese-only.
+
 ## [2.2.5] - 2026-10-02
 - **Seven UI languages.** Chinese, English, Japanese, Korean, German, French and
   Spanish, 539 strings each at 100% coverage. Follows the system language; a
