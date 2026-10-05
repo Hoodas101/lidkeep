@@ -16,11 +16,15 @@
     2. 英文表里的死键 —— 改名/改版后的残留，会让读者误以为功能还在
     3. 某语言表出现英文表里没有的键 —— 键抄错或基线漂移
     4. 某语言表内重复键 —— Swift 字典字面量重复键会在运行期随机取一个
+    5. 译文与中文键**逐字相同**，且不在 SAME_OK 白名单里 —— 十有八九是漏翻。
+
+  第 5 条为什么必须失败：漏翻的表现是「中文环境完全正常、外文环境露出中文」，
+  作者自测发现不了。早先它只打 ⚠ 不改退出码，于是「未译=10」也能让 CI 全绿 ——
+  这正是「看起来在拦、其实没拦」。要保留一条**确实该与中文同形**的条目
+  （标点、共用汉字、单位），必须把它加进 SAME_OK 并写明理由，改的是白名单而不是判据。
 
   【报告】不失败，但需要人看：
-    5. 各语言覆盖率（未覆盖的条目按设计降级为英文，不会坏界面）
-    6. 译文与中文键**逐字相同**的条目 —— 多数是忘了翻，少数是标点类条目
-       （如日文的「：」「）」与中文写法一致）。逐条确认即可。
+    6. 各语言覆盖率（未覆盖的条目按设计降级为英文，不会坏界面）
 
 用法：python3 dev-tools/check-l10n.py [仓库根目录]
 """
@@ -30,6 +34,22 @@ import sys
 
 # 语言表文件：L10nEN.swift / L10nJA.swift / …；L10n.swift 是引擎，不算表。
 TABLE_RE = re.compile(r"^L10n([A-Z]{2})\.swift$")
+
+# 允许「译文与中文键逐字相同」的条目白名单。
+#
+# 判据只有一条：这个字符/片段在中文与目标语言里本来就是同一种写法。
+# 每次往里加东西，都要能说出「为什么同形是对的」；说不出就说明是漏翻，去翻译。
+SAME_OK = {
+    "、",         # 顿号：中文/日文同形
+    "）",         # 全角右括号：中文/日文同形
+    "：",         # 全角冒号：中文/日文同形
+    "；",         # 全角分号：中文/日文同形
+    "：⚠️ ",      # 同上，后缀 emoji
+    "（--lang ",  # 全角左括号：中文/日文同形
+    " 秒",        # 「秒」是中文/日文共用汉字
+    " 秒（",      # 同上，再带一个全角左括号
+    "s\u3000",    # 日文用表意空格对齐，与中文同形；韩文已改为半角（L10nKO）
+}
 
 
 def unescape(s: str) -> str:
@@ -129,11 +149,14 @@ def main() -> int:
             orphan = sorted(set(tkeys) - key_set)
             dup = sorted({k for k in tkeys if tkeys.count(k) > 1})
             same = [k for k, v in pairs if v == k]
+            untranslated = [k for k in same if k not in SAME_OK]
             cover = len([k for k in tkeys if k in key_set])
             pct = cover * 100 // len(keys) if keys else 0
-            flag = "✓" if (cover == len(keys) and not orphan and not dup) else "⚠"
+            flag = "✓" if (cover == len(keys) and not orphan and not dup
+                           and not untranslated) else "⚠"
             print(f"  {flag} {p.name:<14} {cover}/{len(keys)} ({pct}%)"
-                  f"  未译={len(same)}  孤儿键={len(orphan)}  重复={len(dup)}")
+                  f"  同形={len(same)}  漏翻={len(untranslated)}"
+                  f"  孤儿键={len(orphan)}  重复={len(dup)}")
             if orphan:
                 print(f"      ✗ 英文表里没有这些键（键抄错或基线漂移），共 {len(orphan)} 条：")
                 for k in orphan[:10]:
@@ -146,16 +169,19 @@ def main() -> int:
                 for k in dup[:10]:
                     print("         " + repr(k))
                 rc = 1
-            if same:
-                print(f"      ⚠ 译文与中文键逐字相同 {len(same)} 条"
-                      f"（标点类条目属正常，其余多半是漏翻）：")
-                for k in same[:15]:
+            if untranslated:
+                print(f"      ✗ 译文与中文键逐字相同 {len(untranslated)} 条"
+                      f"（非中文界面会露出中文原文；确认同形合理就加进 SAME_OK 并写明理由）：")
+                for k in untranslated[:15]:
                     print("         " + repr(k))
-                if len(same) > 15:
-                    print(f"         …另有 {len(same) - 15} 条")
+                if len(untranslated) > 15:
+                    print(f"         …另有 {len(untranslated) - 15} 条")
+                rc = 1
+            if same and not untranslated:
+                print(f"      ℹ 与中文同形 {len(same)} 条，均在白名单内（标点/共用汉字/对齐空格）")
 
     if rc == 0:
-        print("\n✓ 结构检查通过：无漏翻调用点、无死键、无孤儿键、无重复键")
+        print("\n✓ 结构检查通过：无漏翻调用点、无死键、无孤儿键、无重复键、无漏翻同形条目")
     return rc
 
 

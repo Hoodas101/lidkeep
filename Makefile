@@ -5,8 +5,11 @@
 #   make install    安装 CLI 到 Homebrew 前缀（arm64 用 /opt/homebrew/bin，Intel 用 /usr/local/bin），App 到 /Applications
 #   make uninstall  卸载以上两者（含 launchd 登录项）
 #   make dev-tools  编译开发调试小工具到 build/dev-tools/
+#   make l10n-audit 多语言拼接审计（改文案 / 加语言后手动跑，不在 make test 里）
 #   make clean
-# 自检脚本：dev-tools/check-l10n.py（文案键覆盖）、dev-tools/smoke.sh（端到端冒烟）
+# 自检脚本：dev-tools/check-l10n.py（文案键覆盖与漏翻，由 make test 强制）、
+#           dev-tools/audit-l10n-concat.py（片段拼接，手动）、
+#           dev-tools/smoke.sh（端到端冒烟，由 make test 强制）
 
 CC      = swiftc
 TARGETS = arm64-apple-macosx13.0 x86_64-apple-macosx13.0
@@ -29,7 +32,7 @@ endif
 APPSRC  = build/LidKeep.app
 DEST    = /Applications/LidKeep.app
 
-.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test clean icon
+.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test l10n-audit clean icon
 
 all: cli app
 
@@ -68,6 +71,12 @@ icon:
 test: cli
 	@python3 dev-tools/check-l10n.py .
 	@./dev-tools/smoke.sh
+
+# 多语言**拼接**审计：`L("A") + 值 + L("B")` 拼起来会不会粘连、括号引号有没有错位。
+# 刻意不进 make test：报告 200+ 行，且最后一段「引号边界」必须人工判断配对，
+# 塞进 CI 只会把真正的失败淹掉。改文案 / 加语言之后手动跑，退出码非 0 即硬缺陷。
+l10n-audit:
+	@python3 dev-tools/audit-l10n-concat.py .
 
 # 通用规则：单文件 Swift 程序按架构分别编译后 lipo 合并
 # $(1)=源文件 $(2)=中间产物名 $(3)=输出路径
