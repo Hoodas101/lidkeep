@@ -4,9 +4,9 @@
 
 **Turn the display off. Don't let the Mac sleep.**
 
-The screen goes pitch black; the machine keeps working. Remote desktop stays connected, downloads keep going, builds keep running. Press a hotkey (or run one command over SSH) and the picture comes straight back.
+The screen goes black; the machine keeps working — remote desktop connected, downloads and builds still running. One hotkey, or one command over SSH, brings the picture back.
 
-Unlike true display sleep, LidKeep only cuts the backlight — the display never sleeps, so screen sharing keeps showing the real picture instead of a black frame.
+Unlike real display sleep, LidKeep only cuts the backlight. The display never sleeps, so a remote viewer always sees the real picture instead of a black frame.
 
 [![Release](https://img.shields.io/github/v/release/Hoodas101/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
@@ -16,7 +16,6 @@ Unlike true display sleep, LidKeep only cuts the backlight — the display never
 中文: [README.zh-CN.md](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ```bash
-# Install in one line
 curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
 ```
 
@@ -25,19 +24,19 @@ $ lidkeep off      # screen goes black, system keeps running
 $ lidkeep on       # display restored (also works over SSH)
 ```
 
-> **Local-first and private:** LidKeep runs fully on your Mac — no account, no telemetry, no network calls except an optional 24-hour update check that only reads a public version number. MIT-licensed, zero third-party dependencies, fully open source, with a CI build on every push.
+> **Local-first and private.** No account, no telemetry, no network calls — except an optional daily update check that reads one public version number. MIT-licensed, zero third-party dependencies, CI build on every push.
 
 ## Sound familiar?
 
-macOS wires "display off" and "system asleep" together. You only want the screen off; the system puts the whole machine to sleep.
+macOS ties "display off" and "system asleep" together. You only want the screen off; the whole machine goes to sleep.
 
-| Your situation | What usually happens |
+| You want to… | What macOS does instead |
 |---|---|
-| You want the screen dark to save power, but you're not at the machine | The moment it sleeps, remote desktop connects to a black frame |
-| You close the lid and toss the Mac in a bag | The machine sleeps with it — downloads, builds and remote sessions all drop |
-| You run closed-lid, or carry it closed | The moment sleep is prevented, the built-in panel stays lit — macOS never turns the backlight off just because you closed the lid |
-| You brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it visible to anyone nearby |
-| You use macOS display sleep | The framebuffer is torn down, screen sharing captures nothing, remote access is effectively dead |
+| Blank the screen while you're away | The moment it sleeps, remote desktop connects to a black frame |
+| Close the lid and carry the Mac in a bag | It sleeps too — downloads, builds and remote sessions all drop |
+| Run closed-lid without sleeping | The built-in panel stays lit; macOS never cuts the backlight just because the lid is shut |
+| Brute-force it with `caffeinate` | The screen glows all night — power drain, burn-in risk, and everything on it visible to anyone nearby |
+| Use macOS display sleep | The framebuffer is torn down, screen sharing captures nothing, remote access is dead |
 
 ## How it compares
 
@@ -50,54 +49,24 @@ macOS wires "display off" and "system asleep" together. You only want the screen
 | Third-party keep-awake apps | ❌ stays lit | ✅ | ✅ | partial | some need grants |
 | **LidKeep** | ✅ | ✅ | ✅ | ✅ | **hotkey needs none** (lid mode needs a one-time helper) |
 
-The difference comes down to one thing: **LidKeep only cuts the backlight; it never puts the display to sleep.** The display stays awake, the framebuffer keeps rendering, and a remote viewer always sees the real picture instead of a black screen.
+It comes down to one design decision: **LidKeep cuts the backlight and never puts the display to sleep.** The framebuffer keeps rendering, so a remote viewer always sees the real picture.
 
-## There are only two menu items
+## Using it
 
-| Menu item | What it does | How to use it |
-|---|---|---|
-| **Turn Display Off** | The screen goes dark instantly — backlight cut, not merely dimmed — and the machine keeps running | Click it, or press ⌃⌥⌘B |
-| **Status: … ▸** | Everything else | The title *is* the current status (e.g. `Status: Power · Keep awake`); open it to set each power source separately — the three switches can all be on at once |
+Two menu items, and that's the whole surface:
 
-**Power plan** follows the Windows "Power Options" model: plugged in and on battery are two different situations, so each keeps its own settings. Unplug the charger and the Mac moves to the battery plan within a few seconds — **Power / Battery** in the title tells you which one is active.
+| Menu item | What it does |
+|---|---|
+| **Turn Display Off** | Backlight cut — not dimmed — and the machine keeps running. Click it, or press ⌃⌥⌘B |
+| **Status: … ▸** | Everything else. The title *is* the current status (e.g. `Status: Power · Keep awake`); open it to configure the power source in use |
 
-| Switch | What it does | Cost |
-|---|---|---|
-| **Stay awake after the display sleeps** | The Mac keeps running while the display is dark — whether you blanked it from LidKeep or simply let macOS blank it | easy on battery |
-| **Keep the display on** | Display never sleeps on its own | uses more power |
-| **When the lid closes** | `Sleep` (system default) or `Keep awake` (keeps running, built-in panel off) | "Keep awake" needs the privileged helper; plug in if you can |
+**Power plans follow the Windows "Power Options" model:** plugged in and on battery keep separate settings, swapped within seconds of unplugging. Each plan has three independent switches — *stay awake after the display sleeps*, *keep the display on*, *when the lid closes* — and they can all be on at once. If a plan can't take effect right now (helper missing, battery below the floor, machine too hot) the title says "not active" and the app retries by itself; your settings are never silently rewritten, not even by thermal protection. Full detail in [docs/DETAILS.md](docs/DETAILS.md#usage).
 
-They are not mutually exclusive — the first two act on the system and on the display respectively, and the lid setting is independent of both. **Stay awake after the display sleeps** holds its own anti-sleep assertion from the moment you flip it on, so it works even if you never use *Turn Display Off* — just let the screen go dark on its own. If a plan cannot take effect right now (helper missing, battery below the floor, or the machine is too hot), the menu title says "not active" and the app retries automatically once that changes — your settings are never silently rewritten, not even by thermal protection.
+Three setups cover most people:
 
-## Three ways people actually use it
-
-- **The Mac as a remote host** (UURemote / ToDesk / VNC / SSH) — `lidkeep off` blanks the screen, the machine stays awake, remote frames stay clean. Press the hotkey when you're back at the desk. Worried you'll forget? A 12-hour fallback timeout restores the display automatically.
-- **Closed in a bag, still working** — open **When the lid closes** in the menu and pick **Keep awake**; the built-in panel turns itself off, downloads / builds / remote sessions keep going, and brightness comes back when you open the lid.
-- **Stepping away from the desk** — hit the hotkey; the screen goes dark and your tasks keep running. ⚠️ Blanking is **not** locking — press ⌃⌘Q before you leave.
-
-## Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Hoodas101/lidkeep/main/install-remote.sh | bash
-```
-
-It fetches the latest release, verifies `SHA256SUMS`, installs the app and the CLI, clears
-the quarantine flag and launches. Drop the `| bash` to read it before running it.
-
-Rather do it yourself? Grab `LidKeep-<version>.pkg` or the `.dmg` from
-[Releases](../../releases/latest), or `brew install --cask hoodas101/tap/lidkeep`.
-
-**One manual step, once:** releases are signed **ad-hoc, not notarized** — there is no
-paid Apple Developer certificate behind this project — so Gatekeeper rejects a downloaded
-copy until you clear the flag:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/LidKeep.app
-```
-
-Then click ☀ in the menu bar → **Turn Display Off**. ⌃⌥⌘B brings the picture back.
-
-## Commands you'll actually use
+- **Mac as a remote host** (ToDesk / VNC / SSH) — `lidkeep off` and let it run. Forget to restore? A 12-hour fallback timeout brings the display back automatically.
+- **Closed in a bag, still working** — set **When the lid closes ▸ Keep awake**. The panel goes dark, downloads and builds continue, brightness returns when you open it.
+- **Stepping away from the desk** — hit the hotkey. ⚠️ Blanking is **not** locking: press ⌃⌘Q before you leave.
 
 ```bash
 lidkeep off             # black out now (auto-restores after the fallback timeout)
@@ -108,30 +77,46 @@ lidkeep plan            # both power plans, and which one is active right now
 lidkeep nosleep setup   # privileged helper + anti-sleep in one command
 ```
 
+## Install
+
+The one-liner above fetches the latest release, verifies `SHA256SUMS`, installs the app and the CLI, clears the quarantine flag and launches. Drop the `| bash` to read it before running it.
+
+Rather do it yourself? Grab `LidKeep-<version>.pkg` or the `.dmg` from [Releases](../../releases/latest), or:
+
+```bash
+brew install --cask hoodas101/tap/lidkeep
+```
+
+**One manual step, once:** releases are signed **ad-hoc, not notarized** — there is no paid Apple Developer certificate behind this project — so Gatekeeper rejects a downloaded copy until you clear the flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/LidKeep.app
+```
+
+Then click ☀ in the menu bar → **Turn Display Off**. ⌃⌥⌘B brings the picture back.
+
 ## Documentation
 
-- **[docs/DETAILS.md](docs/DETAILS.md)** — full command list, anti-sleep and the
-  privileged helper, how the brightness trick works, thermal protection, FAQ, development
+- **[docs/DETAILS.md](docs/DETAILS.md)** — full command list, anti-sleep and the privileged helper, how the brightness trick works, thermal protection, FAQ, development
 - **[docs/CONFIG.md](docs/CONFIG.md)** — every `config.json` field
-- **[docs/COOKBOOK.md](docs/COOKBOOK.md)** — ready-made recipes for common setups
+- **[docs/COOKBOOK.md](docs/COOKBOOK.md)** — ready-made recipes (Shortcuts, SSH, closed-lid server, Home Assistant, LaunchAgent)
 
 ## Requirements
 
-macOS 13 Ventura or later (universal binary: Apple Silicon + Intel), and a built-in
-display to black out — external monitors generally don't expose software brightness.
+macOS 13 Ventura or later (universal binary: Apple Silicon + Intel), and a built-in display to black out — external monitors generally don't expose software brightness.
 
 ## Support this project
 
-LidKeep is built and maintained by a single developer. Bug reports and pull requests are answered promptly — every report is read, and most fixes land within a few days. If this project saves you time, **⭐ [star the repo](../../stargazers)** — it's the easiest way to help and costs nothing. Questions and ideas are welcome in [Discussions](../../discussions).
+LidKeep is built and maintained by a single developer. Every issue is read, and most fixes land within a few days.
 
-If you'd like to go further, buying me a coffee keeps it going ☕
+- **⭐ [Star the repo](../../stargazers)** — the easiest way to help, and it costs nothing
+- **[Discussions](../../discussions)** for questions and ideas
+- **[GitHub Sponsors](https://github.com/sponsors/Hoodas101)** — or buy me a coffee ☕
 
 <p align="center">
   <img src="docs/donate-wechat.png" alt="WeChat Pay" width="220">&nbsp;&nbsp;
   <img src="docs/donate-alipay.jpg" alt="Alipay" width="220">
 </p>
-
-**International options (no mainland bank card needed):** GitHub Sponsors, Ko-fi and PayPal are *being set up by the maintainer* — links will appear here once enabled. Until then, a ⭐ star or a detailed bug report helps this project more than you might think.
 
 ## Star history
 
