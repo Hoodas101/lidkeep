@@ -66,6 +66,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
+
+      # install-remote.sh 的兜底版本号靠人手改，而漏改的后果是「查版本失败时装旧版」，
+      # 静默且只在网络受限时才暴露。发 tag 时在这里硬性拦住。
+      - name: Check installer fallback version matches the tag
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          grep -q "^DEFAULT_VERSION=\"${VER}\"" install-remote.sh || {
+            echo "::error::install-remote.sh 的 DEFAULT_VERSION 与 ${GITHUB_REF_NAME} 不一致。发版时必须同步，否则 GitHub API 不可用时会静默装上旧版本。"
+            exit 1
+          }
+          echo "✓ DEFAULT_VERSION=${VER}"
+
       - run: make all
       - name: Build installer (.pkg)
         run: make pkg VERSION=${{ github.ref_name }}
@@ -89,11 +101,35 @@ jobs:
             lidkeep-macos.zip
             LidKeep-*.pkg
             LidKeep-*.dmg
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v v="$VER" '
+            $0 ~ "^## \\[" v "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+
+          # CHANGELOG 末尾的链接定义里已经写了本版的 compare 链接，直接取用，
+          # 不依赖 git 历史（actions/checkout 默认浅克隆，取上一个 tag 会失败）
+          LINK=$(grep -E "^\[${VER}\]:" CHANGELOG.md | sed 's|^\[[^]]*\]: *||' || true)
+          if [ -n "$LINK" ]; then
+            printf '\n**Full Changelog**: https://github.com/%s/%s\n' \
+              "$GITHUB_REPOSITORY" "${LINK#../../}" >> RELEASE_NOTES.md
+          fi
+
+          # 抽不到内容就报警：release 页是下载落地页，正文为空等于让用户看白板
+          if [ "$(wc -c < RELEASE_NOTES.md)" -lt 40 ]; then
+            echo "::warning::CHANGELOG.md 里找不到 $VER 的段落，release 正文会接近空"
+          fi
+          echo "--- release 正文 ---"
+          cat RELEASE_NOTES.md
+
       - uses: softprops/action-gh-release@v3
         with:
+          body_path: RELEASE_NOTES.md
           files: |
             lidkeep-macos.zip
             LidKeep-*.pkg
             LidKeep-*.dmg
             SHA256SUMS
-          generate_release_notes: true

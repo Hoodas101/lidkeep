@@ -12,7 +12,9 @@
 set -u
 
 REPO="Hoodas101/lidkeep"
-DEFAULT_VERSION="2.2.2"
+# 仅在「查最新版本」失败时使用的兜底版本。发版时必须同步这个数字：
+# CI 会校验它与 tag 一致，不一致直接失败（避免静默装成旧版）。
+DEFAULT_VERSION="2.2.5"
 # 实测（2026-09-11，中国大陆）：直连 GitHub Release 资产 10 秒 0 字节，
 # gh-proxy.com 173 KB/s 且 SHA256 与官方 SHA256SUMS 逐字节一致，故作为首选回退。
 MIRRORS=(
@@ -30,7 +32,8 @@ NO_LAUNCH=0
 for a in "$@"; do
   case "$a" in
     --no-launch) NO_LAUNCH=1 ;;
-    -h|--help)   sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # 按「注释块」打印用法，不要写死行号：头部注释变短后固定行号会把下面的代码一起打出来
+    -h|--help)   awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
   esac
 done
 
@@ -164,6 +167,7 @@ fi
 
 say ""
 say "$(m \
-'卸载：跑 LidKeep 菜单里的卸载项，或参考仓库 README。' \
-'To uninstall: use the menu item in LidKeep, or see the README.')"
-say "  https://github.com/${REPO}"
+"卸载：见 README 的「卸载」小节 —— https://github.com/${REPO}#卸载
+（菜单里的「卸载提权助手」只移除提权助手，不是卸载 App。）" \
+"To uninstall: see the \"Uninstall\" section of the README — https://github.com/${REPO}#uninstall
+(The menu's \"Uninstall Privileged Helper\" removes the helper only, not the app.)")"
