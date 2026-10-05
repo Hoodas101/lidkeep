@@ -1,17 +1,5 @@
-# Funding sources for Hoodas101/lidkeep
-#
-# To enable, uncomment the entries you want and replace the placeholders.
-# GitHub will then show a "Sponsor" button on the repo page.
-#
-# Documentation: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
-
-# github: [Hoodas101]                # GitHub Sponsors username (no @)
-# patreon: username
-# open_collective: lidkeep
-# ko_fi: lidkeep
-# tidelift: platform/lidkeep
-# community_bridge: lidkeep
-# liberapay: lidkeep
-# issuehunt: lidkeep
-# otechie: lidkeep
-# custom: ["https://example.com/donate", "WeChat Pay QR in README"]
+# 赞助入口：GitHub Sponsors 已开通（github.com/sponsors/Hoodas101）
+# 启用后仓库页 About 区会显示 "Sponsor" 按钮。
+# 如需增加微信/支付宝打赏二维码，取消下面一行注释并填入链接：
+# custom: ["https://你的落地页"]
+github: [Hoodas101]

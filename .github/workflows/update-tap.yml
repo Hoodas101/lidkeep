@@ -1,0 +1,55 @@
+name: Update Homebrew tap
+
+# 发版后自动把 Casks/lidkeep.rb 的 version 与 sha256 同步到 tap 仓库，
+# 免去每次手动 bump（这是唯一一个一次投入、长期免维护的环节）。
+#
+# 前置条件（一次性）：
+#   1. 建一个 fine-grained PAT，仅授权 Hoodas101/homebrew-tap 的 Contents: Read and write
+#   2. 在本仓库 Settings → Secrets and variables → Actions 新建 Secret：TAP_GITHUB_TOKEN
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: Hoodas101/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Fetch checksum
+        id: sha
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          curl -fsSL "https://github.com/Hoodas101/lidkeep/releases/download/v${V}/SHA256SUMS" -o sums
+          SHA=$(grep "LidKeep-${V}\.dmg" sums | awk '{print $1}')
+          test -n "$SHA" || { echo "未能从 SHA256SUMS 解析出 dmg 校验值"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Bump cask
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          SHA="${{ steps.sha.outputs.sha }}"
+          sed -i "s/^  version \".*\"/  version \"${V}\"/" Casks/lidkeep.rb
+          sed -i "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" Casks/lidkeep.rb
+          grep -E '^  (version|sha256)' Casks/lidkeep.rb
+
+      - name: Commit and push
+        run: |
+          if git diff --quiet; then
+            echo "cask 已是最新，无需提交"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "lidkeep ${GITHUB_REF_NAME}"
+          git push
