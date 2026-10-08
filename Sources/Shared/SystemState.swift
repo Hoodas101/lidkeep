@@ -23,6 +23,9 @@ let logPath = base + "/LidKeep.log"
 let commandFile = base + "/command"            // CLI → 菜单栏 App 的指令文件（比信号可靠）
 let rejectFile = base + "/reject"              // 关屏被拒（电量过低 / 亮度接口不可用）时回传原因
 let nosleepPidFile = base + "/nosleep.pid"     // 防睡眠守护进程
+/// 守护写的状态行路径。CLI 侧历史上有一份自己的本地定义（nosleepStateFile），
+/// 两者必须保持同一字符串，所以在这里加了断言，见 main.swift。
+let nosleepStateFilePath = base + "/nosleep.state"
 /// 电量仿真钩子（仅测试用）。内容同 `LK_SIMULATE_BATTERY`：`电量,batt|ac,discharging|charging`。
 /// 环境变量只在进程启动时读一次，测「运行中拔插电源」必须靠一个能被外部改写的位置；
 /// 而且由 App 拉起的守护拿不到 App 的环境变量。文件不存在时完全走真实 pmset。
@@ -40,24 +43,71 @@ let sudoersPath = "/etc/sudoers.d/lidkeep"
 /// 那正是同一个死锁的另一种写法：子进程把 stderr 写满缓冲后卡在 write 上，
 /// waitUntilExit 永远不返回，调用方（App 或 CLI）就此整体挂死。
 /// 本函数只消费 stdout，没有任何调用方解析 stderr。
-func runCapture(_ exe: String, _ a: [String]) -> String? {
+///
+/// **必须有超时**：pmset 被电量守卫、热保护、电源切换高频调用，sudo -n 在等授权时
+/// 也会停住。没有超时时一次挂起就把主循环整体卡死 —— 表现为菜单无响应、黑屏期间漏光。
+/// 超时后返回 nil，让调用方按「拿不到信息」降级，而不是陪着一起挂。
+func runCapture(_ exe: String, _ a: [String], timeout: TimeInterval = 5.0) -> String? {
     let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = a
     p.standardInput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
     let pipe = Pipe(); p.standardOutput = pipe
     do { try p.run() } catch { return nil }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    p.waitUntilExit()
-    return String(data: data, encoding: .utf8)
+
+    // 读取放到后台队列：主线程只等到超时为止。
+    // 若在主线程里 readDataToEndOfFile()，一个挂住的子进程就会把主线程焊死，
+    // 而超时判断永远没机会执行 —— 那样就等于没有超时。
+    var out = Data()
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .userInitiated).async {
+        out = pipe.fileHandleForReading.readDataToEndOfFile()
+        done.signal()
+    }
+    let readOK = done.wait(timeout: .now() + timeout) == .success
+
+    guard waitExitWithTimeout(p, timeout: readOK ? timeout : 0) else {
+        // 超时（或子进程不肯退出）：杀掉，按「拿不到信息」返回 nil
+        p.terminate()
+        _ = done.wait(timeout: .now() + 0.3)      // 给读取线程一点时间收尾
+        if p.isRunning {
+            kill(p.processIdentifier, SIGKILL)
+            _ = done.wait(timeout: .now() + 0.3)
+        }
+        return nil
+    }
+    // 进程退了但读取还没结束（理论上不会）：给最后一点时间，别丢输出
+    if !readOK { _ = done.wait(timeout: .now() + 0.5) }
+    return String(data: out, encoding: .utf8)
+}
+
+/// 在超时内等进程退出。true = 已退出，false = 仍在跑。
+/// timeout = 0 表示「已经等过了，只查一次」。
+private func waitExitWithTimeout(_ p: Process, timeout: TimeInterval) -> Bool {
+    if !p.isRunning { return true }
+    if timeout <= 0 { return false }
+    let end = Date().addingTimeInterval(timeout)
+    while p.isRunning {
+        if Date() >= end { return false }
+        usleep(20_000)                    // 20ms 粒度，比 100ms 的 waitUntil 更快响应
+    }
+    return true
 }
 
 /// 只跑不管输出，返回退出状态。用于「执行一个副作用动作，只关心成没成」的场合
 /// （拉起/停止守护、复位 disablesleep 之类）。
+///
+/// 超时后返回 -1，与「非零退出码」区分开：调用方据此知道「没跑成」而不是「跑了但失败」。
 @discardableResult
-func sh(_ exe: String, _ a: [String]) -> Int32 {
+func sh(_ exe: String, _ a: [String], timeout: TimeInterval = 10.0) -> Int32 {
     let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = a
     p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
-    try? p.run(); p.waitUntilExit(); return p.terminationStatus
+    try? p.run()
+    if !waitExitWithTimeout(p, timeout: timeout) {
+        p.terminate()
+        if !waitExitWithTimeout(p, timeout: 0.5) { kill(p.processIdentifier, SIGKILL) }
+        return -1
+    }
+    return p.terminationStatus
 }
 
 // MARK: - 亮度读写（DisplayServices 私有框架）
@@ -82,20 +132,34 @@ func onlineDisplays() -> [CGDirectDisplayID] {
     return ids.prefix(Int(count)).isEmpty ? [CGMainDisplayID()] : Array(ids.prefix(Int(count)))
 }
 
-/// 上一次设置亮度时失败的显示器（多数 HDMI/DVI/DP 外接屏不支持软件亮度）。
+/// 上一次设置亮度时失败的显示器（多数HDMI/DVI/DP 外接屏不支持软件亮度）。
 /// 这类屏关不掉，必须让用户看见，而不是让他以为一切正常。
 var lastFailedDisplays: [CGDirectDisplayID] = []
+
+/// 上一次设置亮度时**成功**的显示器。恢复时按它逐块还原 ——
+/// 只读主屏却写所有屏，会把外接屏的亮度一起改成主屏的旧值。
+var lastSetDisplays: [CGDirectDisplayID] = []
 
 func setOneBrightness(_ id: CGDirectDisplayID, _ v: Float) -> Bool {
     guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
     return unsafeBitCast(p, to: DSSet.self)(id, v) == 0
 }
 
-func readBrightness() -> Float {
+/// 读**指定**显示器的亮度。返回 -1 = 读不到（外接屏通常不给接口）。
+func readBrightness(_ id: CGDirectDisplayID) -> Float {
     guard let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") else { return -1 }
     let f = unsafeBitCast(p, to: DSGet.self)
     var v: Float = -1
-    return f(CGMainDisplayID(), &v) == 0 ? v : -1
+    return f(id, &v) == 0 ? v : -1
+}
+
+/// 读主屏亮度。仅用于「当前亮度是多少」这类展示。
+///
+/// 读取**不能**跟着写入一起遍历所有屏然后取任意一个成功值：外接屏作主屏时
+/// 主屏可能读不到，而某块外接屏读得到 —— 那样显示出来的亮度不是用户的内屏亮度。
+/// 读不到就返回 -1，让调用方明确知道「不知道」，而不是拿一个错的数字当兜底。
+func readBrightness() -> Float {
+    readBrightness(CGMainDisplayID())
 }
 
 /// 返回 false = 设置失败（实测成功时返回 0）。失败必须可见，否则用户会以为关屏成功、
@@ -104,27 +168,53 @@ func readBrightness() -> Float {
 func setBrightness(_ v: Float) -> Bool {
     var ok = false
     var failed: [CGDirectDisplayID] = []
+    var done: [CGDirectDisplayID] = []
     for id in onlineDisplays() {
-        if setOneBrightness(id, v) { ok = true } else { failed.append(id) }
+        if setOneBrightness(id, v) { ok = true; done.append(id) } else { failed.append(id) }
     }
     lastFailedDisplays = failed
+    lastSetDisplays = done
     return ok
 }
 
-/// 恢复必须尽最大努力成功：失败意味着用户永远看不见屏幕，因此多次重试而非「设一次就走」
+/// 恢复必须尽最大努力成功：失败意味着用户永远看不见屏幕，因此多次重试而非「设一次走吧」。
+/// 部分成功即视为成功（至少有一块屏回来了），失败的那些记进 lastFailedDisplays 供上层提示。
 @discardableResult
 func restoreBrightness(_ v: Float) -> Bool {
     for i in 0..<6 {
         var ok = false
-        for id in onlineDisplays() { if setOneBrightness(id, v) { ok = true } }
+        var failed: [CGDirectDisplayID] = []
+        var done: [CGDirectDisplayID] = []
+        for id in onlineDisplays() {
+            if setOneBrightness(id, v) { ok = true; done.append(id) } else { failed.append(id) }
+        }
+        lastFailedDisplays = failed
+        lastSetDisplays = done
         if ok { return true }
         usleep(UInt32(150_000 * (i + 1)))
     }
     return false
 }
 
+/// 上一次操作里没能关掉（或没能恢复）的显示器。
+/// 空数组 = 全部成功。非空时**必须**让用户看见 —— 他看到的是「已经黑屏了」，
+/// 而实际有一块屏还亮着，或亮度还停在错误值上。
+func failedDisplayNames() -> [String] {
+    lastFailedDisplays.map { "CGDisplay \(String($0))" }
+}
+
 // MARK: - 电池状态（pmset -g batt，免授权）
-struct Battery { var onBattery = false, discharging = false, percent = 100 }
+///
+/// `percentKnown` 回答的是「这个数字是真读到的，还是只是默认值」。
+/// 它必须有：默认100% 会被当成「电量充足」，于是所有 `percent <= batteryFloor`
+/// 的守卫全部失效，而界面还显示「电量 100%」，用户与程序都看不出保护已失效。
+struct Battery {
+    var onBattery = false
+    var discharging = false
+    var percent = 100
+    /// 百分比是否真的读到了。false 时 percent 不可作为判据（见 belowFloor）。
+    var percentKnown = false
+}
 
 func batteryStatus() -> Battery {
     var b = Battery()
@@ -137,17 +227,29 @@ func batteryStatus() -> Battery {
         let parts = sim.lowercased().split(separator: ",").map(String.init)
         if let p = parts.first, let v = Int(p), (0...100).contains(v) {
             b.percent = v
+            b.percentKnown = true
             b.onBattery = parts.contains("batt")
             b.discharging = parts.contains("discharging")
             return b
         }
     }
-    guard let out = runCapture("/usr/bin/pmset", ["-g", "batt"]), !out.isEmpty else { return b }
+    guard let out = runCapture("/usr/bin/pmset", ["-g", "batt"]), !out.isEmpty else {
+        // 连 pmset 都没跑起来：按「在电池上且已放空」处理，让保护生效。
+        // 宁可误拦一次关屏（用户会看到提示），也不要让它以为有电而放行。
+        b.onBattery = true; b.discharging = true; b.percent = 0
+        return b
+    }
     b.onBattery = out.contains("Battery Power")
     b.discharging = out.range(of: "discharging", options: .caseInsensitive) != nil
     for tok in out.split(whereSeparator: { " \t\n;".contains($0) }) {
-        if tok.hasSuffix("%"), let v = Int(tok.dropLast()) { b.percent = v; break }
+        if tok.hasSuffix("%"), let v = Int(tok.dropLast()), (0...100).contains(v) {
+            b.percent = v; b.percentKnown = true; break
+        }
     }
+    // 识别为电池供电、却读不到百分比：按放空处理（见上面 percentKnown 的理由）。
+    // 台式机走不到这里——它的输出里既没有 "Battery Power" 也没有百分数，
+    // onBattery 为 false，下面这条不生效。
+    if b.onBattery && !b.percentKnown { b.percent = 0 }
     return b
 }
 
@@ -164,6 +266,20 @@ func helperExec(_ arg: String) -> String? {
     guard ["on", "off", "status", "detect"].contains(arg), helperInstalled() else { return nil }
     return runCapture("/usr/bin/sudo", ["-n", helperPath, arg])?
         .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// 提权助手**现在能不能跑通**，而不是「装没装」。
+///
+/// 与 `helperInstalled` 的分工必须分开：
+///   helperInstalled —— 文件齐不齐，用于界面显示「已安装 / 未安装」；
+///   helperUsable    —— 现在能不能执行，用于判断失败原因、决定重试节奏。
+///
+/// 合在一起会出事：助手文件装好后长期存在，但授权可能失效（改过 sudoers、
+/// 系统升级重置过权限、目录被清理）。此时按「已安装」归因，失败就被错记成电量问题，
+/// 而电量问题的重试条件是「不再低于下限」，接电源时恒成立 —— 巡检于是每 15 秒
+/// 清一次退避、每 15 秒重拉一次、每拉一次弹一条通知。本机实测：2 分钟内 8 轮。
+func helperUsable() -> Bool {
+    helperExec("status") != nil
 }
 
 /// 系统级防睡眠当前是否真的生效（回读真实状态，不靠自己记的标志）。

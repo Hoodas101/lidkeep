@@ -29,6 +29,42 @@ let MOD_SHIFT: UInt64 = 1 << 17
 /// 必须与 migrate() 最后一步设的值一致 —— 放在这里就是为了两端不会各写一个数。
 let configSchemaVersion = 2
 
+// MARK: - 兜底超时的取值范围
+//
+// timeout 是「黑屏后多久自动把屏幕叫回来」，语义上是个几小时量级的秒数。
+// 上界取 365 天不是技术限制，是「比这更长就没有意义」的判断 —— 但**必须有**：
+// 少了它，`--timeout 1e300` 会通过校验、落盘、然后在每一次 `Int(timeout)` 转换时
+// 触发 fatal error（Double 转 Int 溢出是 trap，不是返回 0）。
+// 更糟的是它改不回来：用户想 `config --timeout 43200` 救回来，改的过程自己先崩。
+let timeoutUpperBound: Double = 365 * 24 * 3600
+let timeoutDefault: Double = 43200
+
+/// 把任意 timeout 夹回合法区间。**读**与*写*两侧都必须走它：
+/// 只在 CLI 入口拦是拦不住的，config.json 是纯文本，谁都能手写进去。
+func sanitizeTimeout(_ v: Double) -> Double {
+    guard v.isFinite else { return timeoutDefault }      // NaN / ±inf 一律回到默认
+    if v <= 0 { return 0 }                              // 0 = 不启用兜底，是合法取值
+    return min(v, timeoutUpperBound)
+}
+
+/// timeout 显示成整秒。**任何**把 timeout 插进字符串的地方都要用它，
+/// 不要再写 `Int(timeout)` —— 那是把一个用户可写的字段直接交给会 trap 的转换。
+func timeoutText(_ v: Double) -> String {
+    guard v.isFinite else { return "∞" }
+    return "\(Int(min(max(v, 0), timeoutUpperBound)))"
+}
+
+/// 解析命令行上的 timeout 值。合法返回夹紧后的秒数，非法返回 nil。
+///
+/// 守护类子命令（daemon / nosleep-daemon / nosleep on）以前是裸 `Double(args[i+1])`，
+/// 于是 `--timeout abc` 得到 nil 被当成「永久运行」、`--timeout -5` 直接进
+/// Timer.scheduledTimer，两处都不报错。nil 在这些调用点与「不启用」同义，
+/// 所以这里必须让调用方区分：**解析失败与显式的 0 不是一回事**。
+func parseTimeoutArg(_ raw: String) -> Double? {
+    guard let t = Double(raw), t.isFinite else { return nil }
+    return sanitizeTimeout(t)
+}
+
 /// 电量触底时做什么（设置面板「电池」页可改，CLI `--battery-action` 对应）。
 /// 0 是默认值，与老配置兼容，勿改。
 enum BatteryAction: Int, CaseIterable {
@@ -58,7 +94,8 @@ enum BatteryAction: Int, CaseIterable {
 struct Config: Codable {
     var keyCode: Int64 = 11                  // B
     var modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_CMD   // 默认 ⌃⌥⌘
-    var timeout: Double = 43200              // 黑屏后自动恢复兜底，秒；0 = 不启用
+    var timeout: Double = timeoutDefault         // 黑屏后自动恢复兜底，秒；0 = 不启用
+                                              // 经sanitizeTimeout 夹紧，见文件上方说明
     var restoreFixed: Float? = nil           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20               // 电量下限 %，0 = 不限制
     var batteryAction: Int = 0               // 触底时做什么，见 BatteryAction；0 = 只恢复屏幕
@@ -86,7 +123,10 @@ struct Config: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         keyCode = try c.decodeIfPresent(Int64.self, forKey: .keyCode) ?? 11
         modFlags = try c.decodeIfPresent(UInt64.self, forKey: .modFlags) ?? (MOD_CTRL | MOD_ALT | MOD_CMD)
-        timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
+        // 夹紧而不是直接取：config.json 是纯文本，手写进去的 1e300 会一路带到
+        // 每处 Int(timeout) 上触发 fatal error，且用户改不回来（改的那条命令自己先崩）。
+        let rawTimeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? timeoutDefault
+        timeout = sanitizeTimeout(rawTimeout)
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
         batteryAction = try c.decodeIfPresent(Int.self, forKey: .batteryAction) ?? 0
@@ -147,7 +187,7 @@ struct Config: Codable {
 // 同样必须是同一份：Bar 与 CLI 共写 config.json，两端格式化方式一旦不同，
 // 文件就会在「一行压缩」与「缩进整齐」之间来回跳，diff 也失去意义。
 
-/// 读取配置。顺带把「缺方案字段 / 方案值是脏的」自愈回盘一次 ——
+/// 读取配置。顺带把「缺方案字段 / 方案值是脏的 / timeout 被写成非法值」自愈回盘一次 ——
 /// 只在内存里兜底而不落盘，会让兜底值一直暗中生效，用户永远看不到真实配置。
 func loadConfig() -> Config {
     if let d = try? Data(contentsOf: URL(fileURLWithPath: configFile)),
@@ -155,10 +195,20 @@ func loadConfig() -> Config {
         let miss = planFieldsMissing(d)
         if c.migrate(missingAC: miss.ac, missingBattery: miss.battery) { saveConfig(c) }   // 迁移结果落盘
         else if planFieldsNeedRepair(d) { saveConfig(c) }                                   // 脏值落盘修复
+        else if timeoutNeedRepair(d) { saveConfig(c) }                                      // 非法 timeout 落盘修复
         return c
     }
     var c = Config(); c.schemaVersion = configSchemaVersion
     return c
+}
+
+/// 盘上的 timeout 是否非法（NaN / inf / 负数 / 超过上界）。
+/// 与 sanitizeTimeout 配对：解码层已经把它夹回合法值，但要真正清掉脏数据还得再读一遍原始 JSON。
+func timeoutNeedRepair(_ d: Data) -> Bool {
+    guard let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+          let raw = o["timeout"] else { return false }
+    guard let n = raw as? NSNumber else { return true }      // 字符串/数组/NSNull 都算坏
+    return sanitizeTimeout(n.doubleValue) != n.doubleValue
 }
 
 /// 原子写：先写同目录临时文件再 rename。
@@ -180,6 +230,22 @@ func saveConfig(_ c: Config) {
         if rename(tmp, configFile) != 0 { try? fm.removeItem(atPath: tmp) }
     } catch {
         try? fm.removeItem(atPath: tmp)
+    }
+}
+
+/// 清理遗留的 `config.json.tmp.<pid>`。
+///
+/// 临时文件按 pid 命名是为了避免两个进程写同一个 tmp 互相踩，但代价是**每次异常退出
+/// （SIGKILL、崩溃、掉电）都会留下一个孤儿**。实测本机积累 31 个，最早的来自 2026-09-21。
+/// 它们不影响读取，但会一直堆积，且用户会在「配置目录里一堆看不懂的文件」时怀疑数据有问题。
+///
+/// 只删 tmp 前缀的，不碰 config.json 本身；调用方在启动时跑一次即可（扫目录成本可忽略）。
+func cleanConfigTempFiles() {
+    let dir = (configFile as NSString).deletingLastPathComponent
+    guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return }
+    let prefix = (configFile as NSString).lastPathComponent + ".tmp."
+    for name in names where name.hasPrefix(prefix) {
+        try? fm.removeItem(atPath: dir + "/" + name)
     }
 }
 

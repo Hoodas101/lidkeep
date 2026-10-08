@@ -126,7 +126,24 @@ func builtinBrightness() -> Float {
 }
 
 // MARK: - 用户通知（osascript，免授权）
-func notify(_ msg: String) {
+//
+/// 后台被拉起时（`LIDKEEP_QUIET=1`）一律不弹：这类通知由拉起方负责呈现，
+/// 子进程再弹一条只会与拉起方重复。闸门拦不住这种重复 ——
+/// App 每次 spawn 都是新进程，进程内的去重记忆带不过来。
+//
+// key 的选法与 Bar 侧 notifyUser 一致：
+//   用户主动操作的结果（点了关屏、被拒、防睡眠已开启）→ key 传 nil，每次都该有反馈；
+//   持续状态（缺助手降级、亮度恢复失败）→ 传稳定的语义 key，
+//   否则 30 秒一轮的守卫会把同一条通知反复灌进通知中心。
+func notify(_ msg: String, key: String? = nil, window: TimeInterval = notifyWindow) {
+    if let k = key, !notifyGateOpen(k, window: window) {
+        log("notify 已抑制（同一问题 \(Int(window / 3600)) 小时内提醒过）：\(msg)")
+        return
+    }
+    guard !quietMode else {
+        log("notify 已静默（后台拉起）：\(msg)")
+        return
+    }
     let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     _ = runCapture("/usr/bin/osascript", ["-e", "display notification \"\(safe)\" with title \"LidKeep\""])
 }
@@ -269,10 +286,13 @@ func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
     // do shell script：不加引号会被 sh 拆成「不存在的命令 + 参数」，
     // osascript 以非 0 退出、stdout 为空——旧实现只看 stdout 是否为 nil，
     // 于是静默漏装还报「安装完成」（v1.5.2 前 helper 一直没被真正升级的根因）。
-    let safe = f.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    //
+    // 用 AppleScript 的 `quoted form of` 而不是手工转义：手工转义只处理了 `\` 与 `"`，
+    // 而这个参数最终会被 sh 再解析一层，家目录里带单引号（O'Brien 这类名字）时整条命令被截断，
+    // 症状同样是「静默漏装还报成功」。quoted form of 生成的是 sh 层的正确单引号转义。
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    p.arguments = ["-e", "do shell script \"'\(safe)'\" with administrator privileges"]
+    p.arguments = ["-e", "do shell script quoted form of \"\(appleScriptStringLiteral(f))\" with administrator privileges"]
     p.standardInput = FileHandle.nullDevice
     let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
     do { try p.run() } catch { return (false, (L("无法启动 osascript: ") + "\(error)")) }
@@ -282,6 +302,23 @@ func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
     let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     // 以退出码判定成败；输出只用于展示（osascript 的报错文本在 stderr，已合并进来）
     return (p.terminationStatus == 0, out.isEmpty ? (p.terminationStatus == 0 ? L("完成") : L("授权失败或被取消")) : out)
+}
+
+/// 把一个字符串安全地嵌进 AppleScript 的双引号字面量里。
+/// AppleScript 字符串里 `\` 与 `"` 都要转义；换行也必须处理，否则字面量提前结束。
+private func appleScriptStringLiteral(_ s: String) -> String {
+    var out = ""
+    for ch in s {
+        switch ch {
+        case "\\": out += "\\\\"
+        case "\"":  out += "\\\""
+        case "\n": out += "\\n"
+        case "\r": out += "\\r"
+        case "\t": out += "\\t"
+        default:   out.append(ch)
+        }
+    }
+    return out
 }
 
 // MARK: - 防睡眠状态
@@ -387,7 +424,16 @@ func recoverStaleNosleep() {
         return
     }
     _ = helperExec("off")
-    log(L("nosleep: 检测到 disablesleep 仍开启但无守护进程，已自动复位"))
+    // 回读校验，别信「命令发出去了」。
+    // helperExec 装了但 sudo 授权失效时返回 nil，而「返回 nil」不等于「开关还是开的」——
+    // 也可能本来就已被别的路径关掉。判据统一取**真实状态**（普通权限就能读），
+    // 只有确认关掉了才说复位成功。这里报成功而实际还开着，用户会以为机器能睡了，
+    // 而它挂着 disablesleep 一路不睡 —— 恰是「界面说没事、实际有事」那一类。
+    if systemSleepDisabled() {
+        log(L("nosleep: disablesleep 复位失败，系统仍不会睡眠（提权助手授权可能已失效，重装可修复）"))
+    } else {
+        log(L("nosleep: 检测到 disablesleep 仍开启但无守护进程，已自动复位"))
+    }
 }
 
 // MARK: - 提权助手资产（内嵌为唯一真相源）
@@ -431,6 +477,10 @@ OWNDIR=/var/db/lidkeep-nosleep
 
 # 找到真正的调用者 pid：本脚本的祖先链是 helper -> sudo -> 调用者。
 # 逐级上溯并跳过 sudo 自身，取第一个非 sudo 的进程。
+#
+# ps 被限时 ppid 取不到、循环中断，返回空 —— 这是调用方唯一能观测到的信号。
+# 所以三个分支（on / off / detect）都必须区分「没取到 pid」与「取到了 pid 0」，
+# 不能一律当成「没有调用者」：那会让 on 少记一次账、off 少销一次账。
 caller_pid() {
     p=$$
     i=0
@@ -446,13 +496,29 @@ caller_pid() {
 
 # 清理已失效的持有者：进程已退出，或 pid 已被系统复用给别的程序。
 # 不清会让崩溃残留的持有者把系统永久留在「永不睡眠」状态——这是同类工具最常见的翻车方式。
+#
+# 判据必须是「这个 pid 还活着吗」，而不是「ps 说它叫什么」。
+# 原实现是 `case "$(ps -o comm= -p $opid)" in *lidkeep*|*)`，而 ps 在受限环境下
+# 会返回空字符串（setuid 程序可能被拒），于是 case "" 落进 *) 分支把**每一个**
+# 持有者都删掉 —— 计数归零 → 下一个 off 直接 disablesleep 0，
+# 把仍在运行的守护所依赖的防睡眠一并关掉。这与 SystemState.swift 里
+# 「受限环境 ps 会被拒，读状态必须走无权限通道」那段注释自相矛盾。
+#
+# 现在改成两步：先用 kill -0 判断存活（无权限需求），只有确认还活着才去看进程名；
+# 而进程名读不出来时一律**保留** —— 误留一个持有者只是多保持一会儿防睡眠，
+# 误删会让别人正在跑的任务失去防睡眠，后者不可逆。
 prune_owners() {
     [ -d "$OWNDIR" ] || return 0
     for f in "$OWNDIR"/*; do
         [ -e "$f" ] || continue
         opid=${f##*/}
         case "$opid" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
-        case "$(/bin/ps -o comm= -p "$opid" 2>/dev/null)" in
+        # 进程不在了才删。这是唯一在「ps 被拒」时依然成立的判据。
+        /bin/kill -0 "$opid" 2>/dev/null || { rm -f "$f"; continue; }
+        # 还活着：查它是不是我们家的进程。查不出来就当是自己人，保守保留。
+        comm=$(/bin/ps -o comm= -p "$opid" 2>/dev/null | tr -d ' ')
+        [ -n "$comm" ] || continue
+        case "$comm" in
             *lidkeep*|*LidKeep*) ;;
             *) rm -f "$f" ;;
         esac
@@ -483,7 +549,14 @@ case "$1" in
         prune_owners
         /bin/mkdir -p "$OWNDIR" 2>/dev/null && /bin/chmod 700 "$OWNDIR"
         c=$(caller_pid)
-        if [ -n "$c" ]; then : > "$OWNDIR/$c" 2>/dev/null; fi
+        if [ -n "$c" ]; then
+            : > "$OWNDIR/$c" 2>/dev/null
+        else
+            # 记账失败但开关已经开了：这条持有者下次 off 时销不掉，
+            # owner_count 会一直把它算进去 —— 结果是「别人关了防睡眠也不复位」，
+            # 比误关更隐蔽。明确告警，让调用方能提示用户手动 reset。
+            echo "$LOG_TAG: 警告：无法确定调用者 pid，本次开启未记账；如需复位请手动执行 pmset disablesleep 0" >&2
+        fi
         echo "on"
         ;;
     off)
@@ -722,7 +795,13 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         // 系统级开关是持久的，退出前必须显式复位，否则系统再也不会睡眠
         if systemOn {
             _ = helperExec("off")
-            log(L("nosleep: 已复位 disablesleep=0"))
+            // 与 recoverStaleNosleep 同一口径：回读真实状态再说话。
+            // 守卫已经确认「之前确实是开的」，所以这里读到的仍是「开」只能是复位没成功。
+            if systemSleepDisabled() {
+                log(L("nosleep: disablesleep 复位失败，系统仍不会睡眠（提权助手授权可能已失效，重装可修复）"))
+            } else {
+                log(L("nosleep: 已复位 disablesleep=0"))
+            }
         }
         // 守护退出时若内屏还处于合盖熄灭状态，必须先恢复亮度再走，
         // 否则用户开盖后屏幕是黑的，而能负责恢复的进程已经不在了
@@ -764,7 +843,12 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
             log(L("nosleep: 系统级防睡眠已开启（disablesleep=1），覆盖电池与合盖"))
         } else {
             log(L("nosleep: 系统级防睡眠不可用，降级为 caffeinate（仅 AC 有效）"))
-            notify(L("防睡眠降级为「仅电源适配器」：未安装提权助手，电池与合盖仍会睡眠"))
+            // 持续状态，走闸门。App 拉起本守护时带 LIDKEEP_QUIET（不弹），
+            // 所以这条只会弹在用户手动 `nosleep on --system` 的路径上 ——
+            // 而那正是用户反复重试的场景：降级了、没达到预期、再敲一次。
+            // 缺助手不会自己变好，不去重就是每敲一次灌一条。
+            notify(L("防睡眠降级为「仅电源适配器」：未安装提权助手，电池与合盖仍会睡眠"),
+                   key: "helper-missing")
         }
     }
 
@@ -849,14 +933,21 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
 /// 只清 lidAwake 是不够的：方案里还写着 lid=nothing，菜单栏 App 一重投影
 /// 就把标志改回 true，并把守护重新拉起来——用户刚敲的 `nosleep off` 被静默撤销，
 /// 而当 App 没在跑时又确实关掉了，于是「同一命令，结果取决于 App 是否常驻」。
-func clearLidAwake() {
+///
+/// `touchPlan = false` 供菜单栏 App 的「按方案收尾」路径使用：那条路径里方案
+/// 本来就写着 sleep，App 只是在停掉一个还没被停掉的守护。让它连带改方案，
+/// 等于 App 越过用户把设置面板里的选择擦了 —— 且不留任何日志。
+/// 实测症状：把 planAC.lid 写回 nothing，20 秒内被无声改回 sleep。
+func clearLidAwake(touchPlan: Bool = true) {
     var c = loadConfig()
     var dirty = false
     if c.lidAwake { c.lidAwake = false; dirty = true }
-    if batteryStatus().onBattery {
-        if c.planBattery.lid != .sleep { c.planBattery.lid = .sleep; dirty = true }
-    } else if c.planAC.lid != .sleep {
-        c.planAC.lid = .sleep; dirty = true
+    if touchPlan {
+        if batteryStatus().onBattery {
+            if c.planBattery.lid != .sleep { c.planBattery.lid = .sleep; dirty = true }
+        } else if c.planAC.lid != .sleep {
+            c.planAC.lid = .sleep; dirty = true
+        }
     }
     if dirty { saveConfig(c) }
 }
@@ -973,12 +1064,34 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     }
     try? fm.removeItem(atPath: rejectFile)
     // 只读一次亮度：重复调用既浪费，又可能因并发自动亮度调整得到不一致的值
-    let current = max(readBrightness(), 0.0)
-    let saved = current > 0.001 ? current : 0.5          // 已是 0（如上次遗留）时给个可用兜底
+    //
+    // 读不到时（-1）**不能**默默兜成 0.5：那意味着恢复时会把用户原本的亮度
+    // 拉到一半，而他从未要求过。读不到就把restoreFixed 的机会让给用户 ——
+    // 没给就用一个保守的低值（0.35，能看清字），并在日志与通知里说明读不到，
+    // 让他知道恢复后可以自己调回去，而不是被工具悄悄改掉。
+    let raw = readBrightness()
+    let current = raw > 0.001 ? raw : 0
+    let brightnessUnknown = raw <= 0.001
+    let saved = brightnessUnknown ? 0.35 : current
     let restoreTarget = cfg.restoreFixed ?? saved
-    try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
+    // 状态文件是「处于黑屏中 + 该恢复到多少亮度」的唯一记录，写不进去就**不能**继续关屏。
+    // 原先这里是 `try?`：磁盘满时静默失败，进程照样把亮度设成 0 且不留记录，
+    // 于是下一次启动的自愈路径读不到该恢复到哪 —— 屏幕黑着而没人负责点亮。
+    do {
+        try String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
+    } catch {
+        let m = L("无法写入状态文件（磁盘可能已满），已取消关屏以免亮度无法恢复")
+        try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
+        FileHandle.standardError.write((m + "\n").data(using: .utf8)!)
+        log(m)
+        exit(1)
+    }
     try? String(ProcessInfo.processInfo.processIdentifier).write(toFile: pidFile, atomically: true, encoding: .utf8)
     log((L("daemon 启动 pid=") + "\(ProcessInfo.processInfo.processIdentifier)" + L(" 原亮度=") + "\(saved)"))
+    if brightnessUnknown {
+        let m = L("读不到当前亮度（DisplayServices 无返回），恢复时将用 0.35；结束后可自行调回原亮度")
+        log(m); notify(m)
+    }
 
     // auto-nosleep：黑屏期间同时阻止系统睡眠。系统级开关（disablesleep）是持久的，
     // 必须在恢复显示时显式复位，否则合盖永远不睡、放在包里一直耗电。
@@ -1023,7 +1136,7 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
         // （热键已随进程消亡）。失败就留在原地持续重试，直到亮度真的回来。
         if !restoreBrightness(restoreTarget) {
             log(L("错误：亮度恢复失败，转入持续重试（屏幕必须亮回来）"))
-            notify(L("亮度恢复失败，正在持续重试"))
+            notify(L("亮度恢复失败，正在持续重试"), key: "restore-failed")
             let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
                 if restoreBrightness(restoreTarget) {
                     log((L("重试成功，亮度已恢复 ") + "\(restoreTarget)"))
@@ -1087,6 +1200,7 @@ func runService(keyCode: Int64) -> Never {
         restoreBrightness(v)
     }
     try? fm.removeItem(atPath: stateFile)
+    try? fm.removeItem(atPath: commandFile)   // 上次异常退出遗留的指令不该在本进程生效
     recoverStaleNosleep()   // 上次异常退出遗留的 disablesleep 必须先复位
 
     var blacked = false
@@ -1112,7 +1226,7 @@ func runService(keyCode: Int64) -> Never {
         // 用户很难想到要杀进程。必须持续重试直到真的亮回来。
         if !restoreBrightness(target) {
             log(L("错误：亮度恢复失败，转入持续重试"))
-            notify(L("亮度恢复失败，正在持续重试"))
+            notify(L("亮度恢复失败，正在持续重试"), key: "restore-failed")
             let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { t in
                 if restoreBrightness(target) {
                     log((L("重试成功，亮度已恢复 ") + "\(target)"))
@@ -1150,7 +1264,7 @@ func runService(keyCode: Int64) -> Never {
         timeoutTimer?.invalidate(); timeoutTimer = nil
         if cfg.timeout > 0 {
             let tt = Timer.scheduledTimer(withTimeInterval: cfg.timeout, repeats: false) { _ in
-                log((L("兜底超时 ") + "\(Int(cfg.timeout))" + L("s，自动恢复")))
+                log((L("兜底超时 ") + timeoutText(cfg.timeout) + L("s，自动恢复")))
                 restore()
             }
             RunLoop.main.add(tt, forMode: .common)
@@ -1212,9 +1326,23 @@ func runService(keyCode: Int64) -> Never {
         try? fm.removeItem(atPath: rejectFile)
         let cur = max(readBrightness(), 0)
         saved = cur > 0.001 ? cur : saved
-        try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
+        // 与菜单栏 App 侧同一口径：状态文件写不进去就不许关屏。
+        // 它是「黑屏中 + 该恢复到多少亮度」的唯一记录，静默失败等于关掉了却没人负责点亮。
+        do {
+            try String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
+        } catch {
+            return reject(L("无法写入状态文件（磁盘可能已满），已取消关屏以免亮度无法恢复"))
+        }
         blacked = true
-        if !setBrightness(0.0) { log(L("警告：首次设置亮度 0 失败")) }
+        if !setBrightness(0.0) {
+            log(L("警告：首次设置亮度 0 失败"))
+        } else if !lastFailedDisplays.isEmpty {
+            // 部分成功也算成功，但那块没关掉的屏必须让用户看见 ——
+            // 他看到的提示是「已进入黑屏」，而实际有一块屏还亮着。
+            let m = (L("部分屏幕未能熄屏：") + failedDisplayNames().joined(separator: L("、"))
+                     + L("（外接显示器通常不支持软件调亮度）"))
+            log(m); notify(m)
+        }
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留。
@@ -1236,7 +1364,7 @@ func runService(keyCode: Int64) -> Never {
         RunLoop.main.add(t, forMode: .common)
         pinTimer = t
         scheduleGuards()
-        log((L("service 进入黑屏，原亮度 ") + "\(saved)" + L("，兜底 ") + "\(Int(cfg.timeout))" + L("s，电量下限 ") + "\(cfg.batteryFloor)" + "%"))
+        log((L("service 进入黑屏，原亮度 ") + "\(saved)" + L("，兜底 ") + timeoutText(cfg.timeout) + L("s，电量下限 ") + "\(cfg.batteryFloor)" + "%"))
         return true
     }
 
@@ -1244,6 +1372,23 @@ func runService(keyCode: Int64) -> Never {
         restore()
         try? fm.removeItem(atPath: serviceFile)
         exit(0)
+    }
+
+    // 指令文件通道：与菜单栏 App 同一套语义。
+    // 以前 CLI 只写不读，`lidkeep toggle` 对 CLI 常驻服务等于「发 SIGUSR1 去做 blackout」，
+    // 而 blackout 开头就有 guard !blacked —— 已黑屏时静默返回，restore 永远不会被调用，
+    // 命令却打印成功、退出码 0。现在 off / on / toggle 三种都走这条通道。
+    func pumpCommand() {
+        guard let s = try? String(contentsOfFile: commandFile, encoding: .utf8) else { return }
+        try? fm.removeItem(atPath: commandFile)
+        switch s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "off", "black":   log("service: 收到指令 off"); _ = blackout()
+        case "on", "restore":  log("service: 收到指令 on"); restore()
+        case "toggle":
+            log("service: 收到指令 toggle")
+            if blacked { restore() } else { _ = blackout() }
+        default: break
+        }
     }
 
     installHotkey(keyCode: keyCode, modFlags: cfg.modFlags,
@@ -1259,8 +1404,11 @@ func runService(keyCode: Int64) -> Never {
     signal(SIGINT)  { _ in cliSignalTerm = true }
     let sigTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
         reloadConfigIfChanged()
-        if cliSignalOff { cliSignalOff = false; log(L("收到 SIGUSR1")); blackout() }
+        if cliSignalOff { cliSignalOff = false; log(L("收到 SIGUSR1")); _ = blackout() }
         if cliSignalOn  { cliSignalOn = false;  log(L("收到 SIGUSR2")); restore() }
+        // 信号通道处理完再读指令文件：off / on 会同时写文件并发信号，两条通道动作幂等，
+        // 重复执行的结果与执行一次相同（blackout 与 restore 各自都有 guard）。
+        pumpCommand()
         if cliSignalTerm { log(L("收到终止信号")); shutdown() }
     }
     RunLoop.main.add(sigTimer, forMode: .common)
@@ -1297,6 +1445,12 @@ func daemonRunning() -> (pid: Int32, brightness: String)? {
 // MARK: - 命令分发
 let args = CommandLine.arguments
 let cmd = args.count > 1 ? args[1] : "help"
+
+// 清掉历次异常退出（SIGKILL / 崩溃 / 掉电）留下的 config.json.tmp.<pid> 孤儿。
+// 只在会读写的命令上跑，help / 纯展示类命令不必付这个目录扫描的成本。
+if ["config", "plan", "off", "on", "toggle", "daemon", "service", "nosleep"].contains(cmd) {
+    cleanConfigTempFiles()
+}
 
 /// 用 launchctl print 探测指定 label 是否已注册（退出码 0 = 已注册）
 func runProbe(_ label: String) -> Bool {
@@ -1441,7 +1595,7 @@ func runDoctor() -> Int32 {
 
     print((L("\n【配置】") + "\(configFile)"))
     let c = loadConfig()
-    print((L("  热键 ") + "\(modsText(c.modFlags))" + "\(keyName(c.keyCode))" + L("　兜底 ") + "\(Int(c.timeout))" + L("s　"))
+    print((L("  热键 ") + "\(modsText(c.modFlags))" + "\(keyName(c.keyCode))" + L("　兜底 ") + timeoutText(c.timeout) + L("s　"))
           + (L("电量下限 ") + "\(c.batteryFloor)" + L("%　关屏联动防睡眠 ") + "\(c.autoNosleep ? L("开") : L("关"))"))
     // 上面那三个布尔只是**投影**，电源方案才是真值（见 Sources/Shared/Config.swift）。
     // 只报投影的话，用户排查「合盖为什么不睡」时看到的只有 autoNosleep=关，
@@ -1571,18 +1725,83 @@ func runDoctor() -> Int32 {
     return errors.isEmpty ? 0 : 1
 }
 
+// MARK: - 参数校验（下面几个 switch 共用）
+//
+// 为什么必须放在 `switch cmd` 之前：main.swift 的顶层全局量按声明顺序初始化，
+// 放到文件后面的话，上面这些分支执行时它还是未初始化的。
+//
+// ⚠️ **取值选项必须按子命令各给一份，不能共用一个全集。**
+// `--battery` 在 `config` 后面跟一个数字（设电量下限），在 `plan` 后面什么都不跟
+// （选「使用电池」这套方案）。用一份全局集合判漏值，`lidkeep plan --ac --battery`
+// 会被报成「--battery 需要一个值」而拒绝 —— 而那是 help 里写着的合法用法。
+// 这是本条规则唯一一次被实测逮到的现场：先写全集，跑回归才发现 plan 走不通。
+let valueOptionsConfig: Set<String> = [
+    "--key", "--timeout", "--mods", "--restore", "--battery",
+    "--battery-action", "--hotkey", "--lang",
+]
+let valueOptionsPlan: Set<String> = ["--keep-awake", "--display-on", "--lid"]
+let valueOptionsDaemon: Set<String> = ["--key", "--timeout"]
+let valueOptionsNosleep: Set<String> = ["--timeout"]
+
+/// 未知参数的统一拒绝。
+///
+/// 静默忽略比报错危险得多。`lidkeep config --battary 50`（少一个 e）在旧写法下
+/// 整条被跳过，命令照常走完、退出码 0、配置一个字节没改 —— 用户看到的是
+/// 「我明明把电量下限设成 50」。报错只浪费一次敲键；忽略会让人**据此做决定**。
+///
+/// 只拒**以 `-` 开头**的：裸词由顶层 `switch cmd` 分发成子命令，也可能被原样
+/// 透传给一次性 daemon，这一层无权断定它非法。
+///
+/// 刻意不拼括号：`（未生效：`那条已经证明写死全角括号会在英文里混搭成
+/// ` (not active: …）`。这里改成「子命令 + 可用选项」分行，少一处标点就少一类坑。
+func rejectUnknownOption(_ a: String, cmd: String, _ known: [String]) -> Never {
+    let msg = (L("错误：未知参数 ") + a + "\n"
+             + cmd + L(" 可用选项：") + known.joined(separator: " ") + "\n"
+             + L("完整说明：lidkeep help") + "\n")
+    FileHandle.standardError.write(msg.data(using: .utf8)!)
+    exit(1)
+}
+
+/// `lidkeep config --battery` 这种漏了值的写法，原来会掉进「未知参数」分支
+/// （值不存在 → `i + 1 < args.count` 不成立 → 整条被跳过），报错也会指错地方。
+/// 这里先扫一遍，把「漏值」单独挑出来说。
+///
+/// 判据用 `hasPrefix("--")` 而不是「以 `-` 开头」：`--timeout -1` 是合法写法，
+/// 且必须交给值校验去拒（报「取值非法」），而不是被当成漏值。已知取值选项的值
+/// 都不是长选项，负值只带一个减号，两者不会混。
+func rejectMissingValue(_ args: [String], from start: Int, options: Set<String>) {
+    var i = start
+    while i < args.count {
+        let a = args[i]
+        if options.contains(a), (i + 1 >= args.count || args[i + 1].hasPrefix("--")) {
+            FileHandle.standardError.write((L("错误：") + a + L(" 需要一个值") + "\n").data(using: .utf8)!)
+            exit(1)
+        }
+        // 只预检、不改任何状态：真正的解析仍在下面各自的循环里进行
+        i += options.contains(a) ? 2 : 1
+    }
+}
+
 switch cmd {
 case "daemon":
     let cfg = loadConfig()
     var keyCode: Int64 = cfg.keyCode
     var timeout: TimeInterval? = cfg.timeout > 0 ? cfg.timeout : nil
     var serviceMode = false
+    rejectMissingValue(args, from: 2, options: valueOptionsDaemon)
     var i = 2
     while i < args.count {
         if args[i] == "--key", i + 1 < args.count { keyCode = Int64(args[i + 1]) ?? 11; i += 2 }
-        else if args[i] == "--timeout", i + 1 < args.count { timeout = Double(args[i + 1]); i += 2 }
+        else if args[i] == "--timeout", i + 1 < args.count {
+            guard let t = parseTimeoutArg(args[i + 1]) else {
+                FileHandle.standardError.write((L("daemon: --timeout 取值非法: ") + "\(args[i + 1])" + "\n").data(using: .utf8)!)
+                exit(1)
+            }
+            timeout = t > 0 ? t : nil; i += 2
+        }
         else if args[i] == "--no-timeout" { timeout = nil; i += 1 }
         else if args[i] == "--service" { serviceMode = true; i += 1 }
+        else if args[i].hasPrefix("-") { rejectUnknownOption(args[i], cmd: "daemon", ["--key", "--timeout", "--no-timeout", "--service"]) }
         else { i += 1 }
     }
     serviceMode ? runService(keyCode: keyCode) : runDaemon(keyCode: keyCode, timeout: timeout)
@@ -1675,10 +1894,18 @@ case "service":
 case "nosleep-daemon":
     var wantSystem = false
     var nsTimeout: TimeInterval? = nil
+    rejectMissingValue(args, from: 2, options: valueOptionsNosleep)
     var i = 2
     while i < args.count {
         if args[i] == "--system" { wantSystem = true; i += 1 }
-        else if args[i] == "--timeout", i + 1 < args.count { nsTimeout = Double(args[i + 1]); i += 2 }
+        else if args[i] == "--timeout", i + 1 < args.count {
+            guard let t = parseTimeoutArg(args[i + 1]) else {
+                FileHandle.standardError.write((L("nosleep-daemon: --timeout 取值非法: ") + "\(args[i + 1])" + "\n").data(using: .utf8)!)
+                exit(1)
+            }
+            nsTimeout = t > 0 ? t : nil; i += 2
+        }
+        else if args[i].hasPrefix("-") { rejectUnknownOption(args[i], cmd: "nosleep-daemon", ["--system", "--timeout"]) }
         else { i += 1 }
     }
     runNosleepDaemon(timeout: nsTimeout, wantSystem: wantSystem)
@@ -1687,6 +1914,28 @@ case "nosleep":
     let sub = args.count > 2 ? args[2] : "status"
     switch sub {
     case "on":
+        // 参数先解析、后动作。**顺序是有意义的**：把校验排在下面那个「已在运行就
+        // 短路退出」的分支之后，`lidkeep nosleep on --syste` 在守护已经在跑的时候
+        // 会被静默接受并 exit 0（实测：守护在跑时通过、守护不在跑时才报未知参数）——
+        // 同一句命令两种结果，而用户在敲之前无法知道会是哪一种。
+        // `--timeout abc` 的校验当年也被同一个短路吃掉过（守护在跑就完全不校验）。
+        var wantSystem = false
+        var nsTimeout: TimeInterval? = nil
+        rejectMissingValue(args, from: 3, options: valueOptionsNosleep)
+        var i = 3
+        while i < args.count {
+            if args[i] == "--system" { wantSystem = true; i += 1 }
+            else if args[i] == "--timeout", i + 1 < args.count {
+                // 这条是用户直接敲的，必须像 config --timeout 一样报错退出：
+                // 以前是裸 Double()，`--timeout abc` 得到 nil 被当成「永久运行」且不吭声。
+                guard let t = parseTimeoutArg(args[i + 1]) else {
+                    print((L("错误：--timeout 需要 0 到 31536000 之间的秒数（0 = 永久运行），收到: ") + "\(args[i + 1])")); exit(1)
+                }
+                nsTimeout = t > 0 ? t : nil; i += 2
+            }
+            else if args[i].hasPrefix("-") { rejectUnknownOption(args[i], cmd: "nosleep on", ["--system", "--timeout"]) }
+            else { i += 1 }
+        }
         recoverStaleNosleep()
         if let pid = nosleepPid() {
             // 已在跑也要顺手清掉**别的**遗留实例：只报一句「已在运行」就退出去的话，
@@ -1708,14 +1957,6 @@ case "nosleep":
         // 这里传 keeping: nil —— 此刻还没有任何实例值得保留。
         let staleBeforeSpawn = takeOverStaleDaemons()
         if staleBeforeSpawn > 0 { print((L("另清理了 ") + "\(staleBeforeSpawn)" + L(" 个遗留守护进程"))) }
-        var wantSystem = false
-        var nsTimeout: TimeInterval? = nil
-        var i = 3
-        while i < args.count {
-            if args[i] == "--system" { wantSystem = true; i += 1 }
-            else if args[i] == "--timeout", i + 1 < args.count { nsTimeout = Double(args[i + 1]); i += 2 }
-            else { i += 1 }
-        }
         // 电量下限对防睡眠同样强制生效：合盖 + 电池 + 不睡是最容易耗尽电量的组合
         let cfg = loadConfig()
         if cfg.batteryFloor > 0 {
@@ -1807,7 +2048,11 @@ case "nosleep":
         // 恰好是过热保护承诺绝不会发生的事。
         // 这个开关必须开在**子进程**上：Bar 那侧的 `persist: false` 只管住自己不写盘，
         // 管不住它 spawn 出来的这条命令（实测：不带这个参数时配置照样被改写）。
-        if !args.contains("--no-persist") { clearLidAwake() }
+        // `--no-touch-plan` 同理：管住的是「不动用户的电源方案」这一层。
+        let noTouchPlan = args.contains("--no-touch-plan")
+        if !args.contains("--no-persist") || !noTouchPlan {
+            clearLidAwake(touchPlan: !noTouchPlan)
+        }
         guard let pid = nosleepPid() else {
             // 守护进程没了但全局开关可能还开着——这是必须补救的残留态
             recoverStaleNosleep()
@@ -1974,6 +2219,7 @@ case "plan":
     // 未指定来源时两套都改：与旧版「一份全局设置」的直觉保持一致
     if !wantAC && !wantBatt { wantAC = true; wantBatt = true }
     var changed = false
+    rejectMissingValue(args, from: 2, options: valueOptionsPlan)
     var i = 2
     while i < args.count {
         let a = args[i]
@@ -2001,6 +2247,16 @@ case "plan":
             if wantBatt { c.planBattery.lid = la }
             changed = true; i += 2
         }
+        else if a == "--ac" || a == "--battery" || a == "--batt" {
+            // 来源标记，上面那个 for 已经消费过了。这里必须显式吃掉，
+            // 否则会掉进下面的未知参数分支，把 `plan --ac --lid nothing` 这种
+            // 文档里写着的用法判成非法。
+            i += 1
+        }
+        else if a.hasPrefix("-") {
+            rejectUnknownOption(a, cmd: "plan",
+                                ["--ac", "--battery", "--keep-awake", "--display-on", "--lid"])
+        }
         else { i += 1 }
     }
     if changed {
@@ -2016,6 +2272,7 @@ case "plan":
 
 case "config":
     var c = loadConfig()
+    rejectMissingValue(args, from: 2, options: valueOptionsConfig)
     var i = 2
     while i < args.count {
         if args[i] == "--key", i + 1 < args.count {
@@ -2025,8 +2282,8 @@ case "config":
             c.keyCode = k; i += 2
         }
         else if args[i] == "--timeout", i + 1 < args.count {
-            guard let t = Double(args[i + 1]), t >= 0 else {
-                print((L("错误：--timeout 需要非负秒数（0 = 不启用兜底），收到: ") + "\(args[i + 1])")); exit(1)
+            guard let t = Double(args[i + 1]), t.isFinite, t >= 0, t <= timeoutUpperBound else {
+                print((L("错误：--timeout 需要 0 到 31536000 之间的秒数（0 = 不启用兜底），收到: ") + "\(args[i + 1])")); exit(1)
             }
             c.timeout = t; i += 2
         }
@@ -2099,6 +2356,12 @@ case "config":
             c.planAC.keepAwake = false; c.planBattery.keepAwake = false; c.autoNosleep = false; i += 1
         }
         else if args[i] == "--reset" { c = Config(); i += 1 }
+        else if args[i].hasPrefix("-") {
+            rejectUnknownOption(args[i], cmd: "config",
+                                ["--key", "--mods", "--timeout", "--restore", "--battery",
+                                 "--battery-action", "--hotkey", "--auto-nosleep",
+                                 "--no-auto-nosleep", "--lang", "--reset"])
+        }
         else { i += 1 }
     }
     // 热键必须带至少一个修饰键：Carbon RegisterEventHotKey 对无修饰键组合必定注册失败，
@@ -2115,7 +2378,7 @@ case "config":
     if c.modFlags & MOD_SHIFT != 0 { m += "⇧" }
     if c.modFlags & MOD_CMD   != 0 { m += "⌘" }
     print(L("  热键: ") + "\(m)\(keyName(c.keyCode))   (keyCode \(c.keyCode), mods \(c.modFlags))")
-    print((L("  一次性模式超时: ") + "\(Int(c.timeout))" + L(" 秒（") + "\(String(format: "%.1f", c.timeout / 3600))" + L(" 小时，0 = 不限）")))
+    print((L("  一次性模式超时: ") + timeoutText(c.timeout) + L(" 秒（") + "\(String(format: "%.1f", min(c.timeout, timeoutUpperBound) / 3600))" + L(" 小时，0 = 不限）")))
     print((L("  恢复亮度: ") + "\(c.restoreFixed.map { String(format: L("固定 %.0f%%"), $0 * 100) } ?? L("进入黑屏前的亮度"))"))
     print((L("  电量下限: ") + "\(c.batteryFloor > 0 ? ("\(c.batteryFloor)" + L("%（电池供电且放电时，低于此值拒绝关屏并自动恢复）")) : L("不限制"))"))
     // 文案直接取枚举的 title：与设置面板永远一致，不在 CLI 里再抄一遍
@@ -2138,10 +2401,15 @@ case "off":
             FileHandle.standardError.write((L("未能关屏：") + "\(reason)" + "\n").data(using: .utf8)!)
             exit(1)
         }
-        print(ok
-              ? (L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）恢复: 热键或 lidkeep on"))
-              : (L("已发送进入黑屏指令（3s 内未确认，请查看 ") + "\(logPath)" + L("）")))
-        exit(0)
+        // 未确认时必须走非 0：文案已经说了「3s 内未确认」，退出码再说「成功」的话，
+        // 脚本里的 `lidkeep off && echo 已关屏` 会打印「已关屏」而屏幕还亮着。
+        // 与 P1-2 给 toggle 定的口径一致：未被确认的命令不算成功。
+        if ok {
+            print((L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）恢复: 热键或 lidkeep on")))
+            exit(0)
+        }
+        print((L("已发送进入黑屏指令（3s 内未确认，请查看 ") + "\(logPath)" + L("）")))
+        exit(1)
     }
     if let r = daemonRunning() { print((L("已在黑屏模式 (pid ") + "\(r.pid)" + L(")，原亮度 ") + "\(r.brightness)")); exit(0) }
     var extra: [String] = []                          // 一次性模式
@@ -2154,12 +2422,20 @@ case "on":
         try? "on".write(toFile: commandFile, atomically: true, encoding: .utf8)
         kill(pid, SIGUSR2)
         let ok = waitUntil(timeout: 3.0) { !fm.fileExists(atPath: stateFile) }
-        print(ok ? L("已恢复显示") : (L("恢复指令已发送（3s 内仍在黑屏，请查看 ") + "\(logPath)" + L("）")))
-        exit(0)
+        // 同上：未被确认不算成功，退出码要与文案一致
+        if ok { print(L("已恢复显示")); exit(0) }
+        print((L("恢复指令已发送（3s 内仍在黑屏，请查看 ") + "\(logPath)" + L("）")))
+        exit(1)
     }
     guard let r = daemonRunning() else { print(L("当前不在黑屏模式")); exit(0) }
     kill(r.pid, SIGTERM)
-    _ = waitUntil(timeout: 3.0) { daemonRunning() == nil }
+    // 这一条以前连等都没等就直接打印「已恢复显示」，守护没死也照报成功 ——
+    // 与 P1-2 的 toggle 是同一类：命令自称成功，实际状态没变。
+    let gone = waitUntil(timeout: 3.0) { daemonRunning() == nil }
+    if !gone {
+        print((L("已发送恢复指令（3s 内仍在黑屏，请查看 ") + "\(logPath)" + L("）")))
+        exit(1)
+    }
     print((L("已恢复显示，亮度 ") + "\(r.brightness)" + L("，当前实际亮度 ") + "\(readBrightness())"))
 
 case "status":
@@ -2192,8 +2468,10 @@ case "toggle":
     if let pid = servicePid() {
         let before = fm.fileExists(atPath: stateFile)
         try? fm.removeItem(atPath: rejectFile)
+        // 只走指令文件，不发 SIGUSR1：切换是相对动作，而信号只有「关」一个含义。
+        // 常驻服务两条通道都认指令文件（菜单栏 App 忽略信号，CLI 服务两者都读），
+        // 发信号只会让 CLI 服务多做一次 blackout，把状态又推回去。
         try? "toggle".write(toFile: commandFile, atomically: true, encoding: .utf8)
-        kill(pid, SIGUSR1)                            // 菜单栏 App 认命令文件，信号仅用于唤醒
         let changed = waitUntil(timeout: 3.0) {
             fm.fileExists(atPath: stateFile) != before || fm.fileExists(atPath: rejectFile)
         }
@@ -2201,9 +2479,13 @@ case "toggle":
             FileHandle.standardError.write((L("未能切换：") + "\(reason)" + "\n").data(using: .utf8)!)
             exit(1)
         }
-        print(changed
-              ? (fm.fileExists(atPath: stateFile) ? (L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）")) : L("已恢复显示"))
-              : (L("已发送切换指令（3s 内未确认，请查看 ") + "\(logPath)" + L("）")))
+        if !changed {
+            FileHandle.standardError.write((L("切换指令未被常驻服务响应（3s 内状态未变化，请查看 ") + "\(logPath)" + L("）") + "\n").data(using: .utf8)!)
+            exit(1)
+        }
+        print(fm.fileExists(atPath: stateFile)
+              ? (L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）"))
+              : L("已恢复显示"))
         exit(0)
     }
     if let r = daemonRunning() {

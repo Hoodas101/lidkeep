@@ -135,7 +135,7 @@ func syncPlanToActive() -> Config {
     if before != (c.autoNosleep, c.keepDisplayOn, c.lidAwake) {
         blog("bar: 按「\(powerSourceTitle(battery: onBatteryNow()))」方案对齐生效值"
              + "（息屏保持唤醒=\(p.keepAwake) 屏幕常亮=\(p.displayOn) 合盖=\(p.lid.rawValue)）")
-        saveConfig(c)
+        ScreenController.shared.writeConfig(c)
     }
     return c
 }
@@ -153,7 +153,7 @@ func commitPlans(_ plans: (ac: PowerPlan, battery: PowerPlan)) -> Bool {
     let p = activePlan(c)
     projected(&c, from: p)
     let wasOurs = ctl.cfg.lidAwake      // 必须在 ctl.cfg = c 之前取：投影会把标志改成 false
-    saveConfig(c)
+    ctl.writeConfig(c)
     ctl.cfg = c                  // 先落盘并让归属判断看到新方案，再动合盖守护
     ctl.syncKeepDisplayOn()
     ctl.syncKeepAwake()
@@ -181,7 +181,7 @@ func switchPlanIfPowerSourceChanged() -> Bool {
     projected(&c, from: p)
     let ctl = ScreenController.shared
     let wasOurs = ctl.cfg.lidAwake      // 取值须在 ctl.cfg 被覆盖之前，见 reconcileLidDaemon 注释
-    saveConfig(c)
+    ctl.writeConfig(c)
     ctl.cfg = c
     ctl.syncKeepDisplayOn()
     ctl.syncKeepAwake()
@@ -189,9 +189,12 @@ func switchPlanIfPowerSourceChanged() -> Bool {
     // 周期巡检会在电量回升、助手就绪后自动补起守护。
     let lidOK = ctl.reconcileLidDaemon(want: p.lid == .nothing, why: "电源来源切换", wasOurs: wasOurs)
     if !p.keepAwake && ctl.nosleepOn && ctl.nosleepAuto { ctl.stopNosleep(L("切换电源方案")) }
-    var msg = L("电源方案：") + powerSourceTitle(battery: isBattery) + L(" —— ") + p.summary
-    if p.lid == .nothing && !lidOK { msg += L("（合盖不睡未生效，将在条件满足后自动重试）") }
-    notifyUser(msg)
+    // 不弹通知。用户拔插电源时在做别的事，而菜单父项标题（「状态：xxx」）
+    // 已经反映了当前生效的那套方案 —— 通知只是把同一件事再说一遍。
+    // 笔记本一天插拔十几次就是十几条通知，这是「经常弹」的主要来源之一。
+    if p.lid == .nothing && !lidOK {
+        blog("bar: 合盖不睡未生效（电源方案切换），将在条件满足后自动重试")
+    }
     return true
 }
 var lastPowerSourceWasBattery: Bool? = nil
@@ -204,12 +207,93 @@ func hotkeyText(_ c: Config) -> String { modsText(c.modFlags) + keyName(c.keyCod
 // MARK: - 全局热键：Carbon（实现见 Sources/Shared/SystemState.swift）
 
 // MARK: - 用户通知（osascript，免授权）
-func notifyUser(_ msg: String) {
+//
+/// 弹一条用户通知。`key` 非 nil 时走闸门：同一问题在 `window` 内只弹一次。
+///
+/// 怎么选 key：
+///   用户主动操作的结果（点菜单开了某项、关屏被拒）→ key 传 nil，每次都该有反馈；
+///   后台发现的持续性问题（缺助手、过热、恢复失败）→ 传稳定的语义 key，
+///   否则周期巡检会把同一条通知按轮次灌进通知中心。
+func notifyUser(_ msg: String, key: String? = nil, window: TimeInterval = notifyWindow) {
+    if let k = key, !notifyGateOpen(k, window: window) {
+        blog("bar: 通知已抑制（同一问题 \(Int(window / 3600)) 小时内提醒过）：\(msg)")
+        return
+    }
+    guard !quietMode else {
+        blog("bar: 通知已静默（后台拉起）：\(msg)")
+        return
+    }
     let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     p.arguments = ["-e", "display notification \"\(safe)\" with title \"LidKeep\""]
     try? p.run()
+}
+
+/// 后台 spawn CLI 时的统一环境。
+///
+/// 带 `LIDKEEP_QUIET=1`，子进程全程不弹通知 —— 否则一次失败会同时从本进程
+/// 和它 spawn 的 CLI 各弹一条，用户看到成对出现的重复通知。
+/// 后台动作的对错一律由本进程统一呈现。
+func quietEnv() -> [String: String] {
+    var e = ProcessInfo.processInfo.environment
+    e["LIDKEEP_QUIET"] = "1"
+    return e
+}
+
+/// 合盖守护没能拉起来的原因。
+///
+/// 必须由 `setLidAwake` 明确回传，不能靠调用方事后猜。
+/// 旧的写法是 `helperInstalled() ? "battery" : "helper"` —— 只问「助手装没装」，
+/// 于是「装了但调不通」被归成电量问题。两种原因的重试条件完全不同：
+/// 电量问题接上电源就好了，助手问题要用户去重装。
+/// 归错的代价不是文案不准，而是巡检每 15 秒清一次退避、重拉一次、弹一条通知。
+enum LidAwakeBlocker: String {
+    case noCLI       = "no-cli"
+    case noHelper    = "no-helper"      // 没装
+    case helperDead  = "helper-dead"    // 装了但调不通（授权失效 / 竞态）
+    case thermal     = "thermal"
+    case battery     = "battery"
+    case startFailed = "start"
+
+    /// 这个原因会不会在用户什么都没做的情况下自行消失。
+    ///
+    /// 只有会自行消失的原因，巡检才允许清掉退避立刻重试。
+    /// 助手类原因是**持久**的：用户不去重装，它就一直不通；
+    /// 按「条件已恢复」反复清退避，换来的就是无限重试循环。
+    var clearsOnItsOwn: Bool {
+        switch self {
+        case .thermal, .battery: return true
+        case .noCLI, .noHelper, .helperDead, .startFailed: return false
+        }
+    }
+
+    /// 重试间隔。会自行消失的原因等 1 分钟就够（插上电源是即刻的事），
+    /// 需要用户动手的原因等 10 分钟 —— 既不让他觉得没反应，也不刷日志。
+    var retryDelay: TimeInterval { clearsOnItsOwn ? 60 : 600 }
+
+    /// 给用户看的一句话原因，用在菜单与设置面板的「未生效」标注里。
+    var shortReason: String {
+        switch self {
+        case .noCLI:       return L("缺少命令行工具")
+        case .noHelper:    return L("需要先安装提权助手")
+        case .helperDead:  return L("提权助手失效，需重装")
+        case .thermal:     return L("设备过热")
+        case .battery:     return L("电量低于下限")
+        case .startFailed: return L("启动失败")
+        }
+    }
+
+    /// 是否值得打断用户（弹通知）。
+    ///
+    /// 判据是「用户能不能自己看出来」：电量低与过热在菜单上一眼可见，
+    /// 弹通知只是重复；助手类问题不看日志根本看不出，才需要主动告知。
+    var needsUserAction: Bool {
+        switch self {
+        case .noHelper, .helperDead, .noCLI: return true
+        case .thermal, .battery, .startFailed: return false
+        }
+    }
 }
 
 var gotTerminate = false
@@ -229,17 +313,46 @@ final class ScreenController {
     var timeoutTimer: Timer?
     var battTimer: Timer?
     var powerTimer: Timer?       // 电源来源轮询（拔插电源 → 切换方案）
-    /// 合盖守护拉起失败后的退避时间与通知节流。
-    /// 失败原因分两类：缺提权助手（能力缺失，不会自愈 → 长退避）与电量低于下限
-    /// （随时会变 → 短退避，且一旦恢复就地清除，别让用户插上电还干等）。
+    /// 合盖守护拉起失败后的退避时间与原因。
+    ///
+    /// 原因用枚举而不是字符串：巡检要靠它判断「这个原因会不会自行消失」，
+    /// 字符串写错了编译期发现不了，而判断错的后果是无限重试。
+    /// 退避值由 `LidAwakeBlocker.retryDelay` 给出（自愈类 1 分钟、需用户动手类 10 分钟）。
     var lidRetryAfter: Date? = nil
-    var lidRetryBlocker: String? = nil
-    var lidNotifyAt: Date? = nil
+    var lidRetryBlocker: LidAwakeBlocker? = nil
     /// 同一轮低电量只提醒一次。30 秒一轮的检查会把通知中心刷满。
     private var battNotified = false
     var cmdTimer: Timer?
     var signalSources: [DispatchSourceSignal] = []
     var configMtime: Date? = nil
+    /// 把自己刚写完的 config.json 记为「已知」。
+    ///
+    /// reloadConfigIfChanged 只认 mtime 变化，没法区分「CLI / 用户改的」与「自己刚写的」。
+    /// 于是 Bar 每次落盘，0.3 秒后都会被自己当成外部改动，完整重放一遍
+    /// installHotkey / syncKeepDisplayOn / syncKeepAwake / reconcileLidDaemon /
+    /// 重建电量定时器 / 整片替换设置面板的编辑副本 —— 用户正在面板里改的东西被静默丢弃。
+    /// 本机日志里6 秒内出现 3 次，全文累计 225 次。
+    ///
+    /// 必须在**每次** Bar 侧落盘后调用，一处漏掉那条路径就会重新开始自触发。
+    /// 所以 Bar 侧一律走 writeConfig / patchConfig 这两个封装，不直接调 saveConfig / updateConfig。
+    private func markConfigOurs() {
+        if let a = try? fm.attributesOfItem(atPath: configFile),
+           let m = a[.modificationDate] as? Date {
+            configMtime = m
+        }
+    }
+
+    /// Bar 侧落盘 + 打戳。见 markConfigOurs。
+    func writeConfig(_ c: Config) {
+        saveConfig(c)
+        markConfigOurs()
+    }
+
+    /// Bar 侧的「重读 → 改 → 写」+ 打戳。见 markConfigOurs。
+    func patchConfig(_ mutate: (inout Config) -> Void) {
+        updateConfig(mutate)
+        markConfigOurs()
+    }
     var selfTesting = false
     var onStateChange: (() -> Void)?
     /// config.json 被外部（CLI / 手动编辑）改动并已重载时回调。
@@ -273,7 +386,7 @@ final class ScreenController {
     /// 守护写入的状态行：level|since|systemOn。用于确认合盖守护真的到达系统级。
     func nosleepInfoStatus() -> (level: String, systemOn: Bool)? {
         guard lidDaemonPid() != nil,
-              let s = try? String(contentsOfFile: base + "/nosleep.state", encoding: .utf8) else { return nil }
+              let s = try? String(contentsOfFile: nosleepStateFilePath, encoding: .utf8) else { return nil }
         let p = s.split(separator: "|").map(String.init)
         return (level: p.count > 0 ? p[0] : "caffeinate",
                 systemOn: p.count > 2 ? p[2] == "1" : false)
@@ -289,50 +402,72 @@ final class ScreenController {
     ///
     /// `persist = false` 供过热保护使用：停掉守护但**不改配置** —— 热量是瞬时状态，
     /// 降温后方案要能原样生效；若照电量那条路径把 `lidAwake` 写成 false，
-    /// 一次编译过热就会永久抹掉用户设的「合盖时 保持唤醒」。
+    /// 一次编译过热就会永久抹掉用户设的「合盖时保持唤醒」。
+    ///
+    /// `touchPlan = false` 用于「按方案收尾」那条路径（方案里本来就是 sleep，
+    /// 守护只是还没被停掉）。`persist` 管的是 `lidAwake` 这个派生标志，
+    /// `touchPlan` 管的是 `planAC.lid` / `planBattery.lid` 这两个**用户设置**——
+    /// 后者必须由用户在设置面板或 CLI 里亲自改。子进程 `nosleep off` 默认会把
+    /// 当前电源那套方案的合盖项一起改成 sleep（clearLidAwake 的设计意图：
+    /// 用户亲手敲的命令就该把设置一并归位），而 App 只是在对齐自己的守护状态，
+    /// 照着跑就把用户的设置悄悄擦掉了。本机实测：把 planAC.lid 写回 nothing 后，
+    /// 20 秒内就被改回 sleep，而日志里没有任何一条记录提到这次改动。
+    /// 返回 nil = 成功；非 nil = 没拉起来的原因（供调用方决定重试节奏与是否提醒）。
     @discardableResult
-    func setLidAwake(_ on: Bool, persist: Bool = true) -> Bool {
+    func setLidAwake(_ on: Bool, persist: Bool = true, touchPlan: Bool = true) -> LidAwakeBlocker? {
         let snapshot = loadConfig()
         guard let cli = fm.isExecutableFile(atPath: cliPath) ? cliPath : nil else {
             blog("bar: 合盖模式需要命令行工具")
-            return false
+            return .noCLI
         }
         if on {
             guard helperInstalled() else {
                 blog("bar: 合盖模式需要提权助手（覆盖合盖睡眠必须 root）")
-                return false
+                return .noHelper
             }
             if thermalBlocksStart() {
                 blog("bar: 设备过热（critical），暂不能开启合盖模式")
-                return false
+                return .thermal
             }
             if batteryBlocksStart(snapshot) {
                 blog("bar: 电量 \(batteryStatus().percent)% 低于下限，暂不能开启合盖模式")
-                return false
+                return .battery
             }
             let p = Process()
             p.executableURL = URL(fileURLWithPath: cli)
             p.arguments = ["nosleep", "on", "--system"]
+            p.environment = quietEnv()
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
             p.standardInput = FileHandle.nullDevice
-            do { try p.run(); p.waitUntilExit() } catch { blog("bar: 启动合盖守护失败 \(error)"); return false }
+            do { try p.run(); p.waitUntilExit() } catch {
+                blog("bar: 启动合盖守护失败 \(error)")
+                return .startFailed
+            }
             guard lidDaemonPid() != nil else {
                 blog("bar: 合盖守护启动未确认，详见 CLI 日志")
-                return false
+                return .startFailed
             }
             // 必须确认到达系统级：降级成进程级时合盖照样睡，用户会带着错误预期合盖
             if let info = nosleepInfoStatus(), info.level != "system" {
                 blog("bar: 合盖守护降级为进程级（helper 调用失败），回滚")
                 let q = Process()
                 q.executableURL = URL(fileURLWithPath: cli)
-                q.arguments = ["nosleep", "off"]
+                // --no-touch-plan：这次回滚是在撤掉一次**没成功**的开启，
+                // 不是用户改主意。方案里用户的「合盖不睡」必须留着，
+                // 巡检会在条件具备时自动补起。少了这个参数，
+                // 每次 helper 调用失败都会把用户的设置擦成「合盖睡眠」。
+                // --no-persist 同理：回滚不该碰配置。少了它，子进程把 lidAwake
+                // 写成 false，本进程的投影又推回 true，配置每轮震荡一次
+                // （日志里表现为「电源方案被外部改动」反复出现）。
+                q.arguments = ["nosleep", "off", "--no-touch-plan", "--no-persist"]
+                q.environment = quietEnv()
                 q.standardOutput = FileHandle.nullDevice; q.standardError = FileHandle.nullDevice
                 q.standardInput = FileHandle.nullDevice
                 try? q.run(); q.waitUntilExit()
-                return false
+                return .helperDead
             }
             // 到这里进程动作已结束，才重读并只改自己这一个字段
-            if persist { updateConfig { $0.lidAwake = true } }
+            if persist { patchConfig { $0.lidAwake = true } }
             cfg = loadConfig()
             blog("bar: 合盖不睡眠已开启 pid=\(lidDaemonPid() ?? 0)")
         } else {
@@ -341,16 +476,20 @@ final class ScreenController {
             // `persist: false` 只保证**本进程**不写盘；这里 spawn 出去的 `nosleep off`
             // 默认会把持久标志一起清掉，等于把 persist 参数架空。必须把意图透传给子进程，
             // 否则过热保护「不动配置」的承诺会被自己的子进程破坏（实测踩到）。
-            p.arguments = ["nosleep", "off"] + (persist ? [] : ["--no-persist"])
+            // `touchPlan` 同理：不让子进程碰用户的电源方案，理由见函数注释。
+            p.arguments = ["nosleep", "off"]
+                + (persist ? [] : ["--no-persist"])
+                + (touchPlan ? [] : ["--no-touch-plan"])
+            p.environment = quietEnv()
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
             p.standardInput = FileHandle.nullDevice
             do { try p.run(); p.waitUntilExit() } catch { blog("bar: 停止合盖守护失败 \(error)") }
-            if persist { updateConfig { $0.lidAwake = false } }
+            if persist { patchConfig { $0.lidAwake = false } }
             cfg = loadConfig()
             blog("bar: 合盖不睡眠已关闭")
         }
         onStateChange?()
-        return true
+        return nil
     }
 
     /// 让「合盖守护」与当前方案对齐，并区分守护的归属。
@@ -375,27 +514,37 @@ final class ScreenController {
             // 过热期间不拉起。必须挡在这里而不是只挡 setLidAwake：
             // 否则失败会被记成「电量/助手」原因并写入退避窗口，
             // 用户插上电、装好助手之后仍要干等一个莫名其妙的 1~10 分钟。
-            if thermalBlocksStart() { return false }
+            // 热是临时状态，不设退避 —— 下一轮巡检就能重试。
+            if thermalBlocksStart() {
+                lidRetryBlocker = .thermal
+                lidRetryAfter = nil
+                return false
+            }
             if let t = lidRetryAfter, Date() < t, !force { return false }   // 退避中，不反复重试
-            let ok = setLidAwake(true)
-            if ok {
+            let failure = setLidAwake(true)
+            if failure == nil {
                 lidRetryAfter = nil
                 lidRetryBlocker = nil
+                // 真的起来了就开闸：下次再坏掉要能立刻提醒，而不是被上一次的静默窗口吞掉
+                notifyGateReset("lid-blocked")
             } else {
-                // 两种失败原因的重试节奏不同：缺助手要等用户去装，电量低插上电就好了。
-                // 用同一个退避值的话，要么白等一分钟，要么每 15 秒重试一次把日志刷满。
-                let blocker = helperInstalled() ? "battery" : "helper"
+                let blocker = failure!
+                // 原因由 setLidAwake 回传，不再靠 helperInstalled() 现猜。
+                // 猜的代价不是文案不准 —— 是巡检据此把「持久问题」当成「临时问题」，
+                // 每 15 秒清一次退避、重拉一次、弹一条通知（本机实测 2 分钟 8 轮）。
                 lidRetryBlocker = blocker
-                lidRetryAfter = Date().addingTimeInterval(blocker == "helper" ? 600 : 60)
-                // 电量低是用户自己就知道的状态，弹通知只会添乱；缺助手才需要主动告知
-                if blocker == "helper",
-                   lidNotifyAt == nil || Date().timeIntervalSince(lidNotifyAt!) > 1800 {
-                    lidNotifyAt = Date()
-                    notifyUser(L("「合盖不睡」未能生效：需要提权助手，且电量需高于下限。详见「打开日志」。"))
+                lidRetryAfter = Date().addingTimeInterval(blocker.retryDelay)
+                // 电量低、过热在菜单上一直写着，用户自己看得见，弹通知只是重复；
+                // 助手类问题不看日志根本看不出，才值得打断一次。
+                // 走闸门：同一原因 24 小时内只弹一次。
+                if blocker.needsUserAction {
+                    notifyUser(L("「合盖不睡」未能生效：") + blocker.shortReason + L("。点菜单可查看与重试。"),
+                               key: "lid-blocked")
                 }
-                blog("bar: 合盖守护拉起失败（\(why)，原因=\(blocker)），\(blocker == "helper" ? "10 分钟" : "1 分钟")内不再重试")
+                blog("bar: 合盖守护拉起失败（\(why)，原因=\(blocker.rawValue)），"
+                     + "\(Int(blocker.retryDelay / 60)) 分钟内不再重试")
             }
-            return ok
+            return failure == nil
         }
         guard running else { return true }
         guard wasOurs else {
@@ -403,7 +552,12 @@ final class ScreenController {
             return true
         }
         blog("bar: 当前方案不要求合盖运行（\(why)），停止守护")
-        return setLidAwake(false)
+        // touchPlan: false —— 走到这里说明方案里本来就写着 sleep，
+        // 守护只是还没跟着停。此刻若让子进程去归位方案，改的是**用户的设置**，
+        // 而用户什么都没做。实测：本机把 planAC.lid 写回 nothing 后，
+        // 30 秒内被这条路径无声改回 sleep，日志里只有「合盖不睡眠已关闭」。
+        _ = setLidAwake(false, touchPlan: false)
+        return true
     }
 
     /// 合盖运行无法生效（缺提权助手 / 电量低于下限）时，把当前电源那套方案的合盖项退回「睡眠」。
@@ -433,7 +587,7 @@ final class ScreenController {
             c.planAC.displayOn = false
         }
         projected(&c, from: activePlan(c))
-        saveConfig(c)
+        writeConfig(c)
         cfg = c
         blog("bar: 电量保护触发（\(reason)），当前方案已退回「合盖睡眠 + 不强制唤醒 + 不保持常亮」")
     }
@@ -458,7 +612,7 @@ final class ScreenController {
             c.planAC.displayOn = false
         }
         projected(&c, from: activePlan(c))
-        saveConfig(c)
+        writeConfig(c)
         cfg = c
         blog("bar: 电量保护触发（\(reason)），已关闭「保持屏幕常亮」")
         syncKeepDisplayOn()
@@ -643,6 +797,18 @@ final class ScreenController {
     /// 此刻系统睡眠是否真的被挡住（黑屏联动持有的 -dis 也算）
     var systemSleepBlocked: Bool { keepCaff != nil || nosleepOn }
 
+    /// 「息屏后保持唤醒」「保持屏幕常亮」没装上断言时，给用户看的一句话原因。
+    ///
+    /// 只可能返回这两条：它们是仅有的两个会主动拒绝的入口
+    /// （见 startKeepAwakeAssertion / startKeepDisplayOn 里的守卫）。
+    /// 实测在菜单打开的那一刻重算，比记住上次的拒绝原因准 ——
+    /// 电量或温度在这中间可能已经回到正常，显示旧原因等于骗人。
+    func assertionBlockReason() -> String {
+        if thermalBlocksStart() { return L("设备过热") }
+        if batteryBlocksStart(cfg) { return L("电量低于下限") }
+        return L("正在重试")
+    }
+
     // MARK: 状态
     var isBlacked: Bool { fm.fileExists(atPath: stateFile) }
 
@@ -675,9 +841,25 @@ final class ScreenController {
         try? fm.removeItem(atPath: rejectFile)
         let cur = max(readBrightness(), 0)
         saved = cur > 0.001 ? cur : saved
-        try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
+        // 状态文件是「处于黑屏中 + 该恢复到多少亮度」的唯一记录，写不进去就**不能**继续关屏。
+        // 原先这里是 `try?`：磁盘满（或目录权限异常）时静默失败，进程照样把亮度设成 0，
+        // 而没有留下任何记录 —— 下次启动的自愈路径读不到它，屏幕就真的黑在那了。
+        // 宁可这次不关屏并说清原因，也不要关掉之后没人知道该恢复到哪。
+        do {
+            try String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
+        } catch {
+            return reject(L("无法写入状态文件（磁盘可能已满），已取消关屏以免亮度无法恢复"))
+        }
         blacked = true
-        if !setBrightness(0.0) { blog("bar: 警告：首次设置亮度 0 失败") }
+        if !setBrightness(0.0) {
+            blog("bar: 警告：首次设置亮度 0 失败")
+        } else if !lastFailedDisplays.isEmpty {
+            // 部分成功也算成功，但那块没关掉的屏必须让用户看见 ——
+            // 他看到的提示是「已进入黑屏」，而实际有一块屏还亮着。
+            let m = (L("部分屏幕未能熄屏：") + failedDisplayNames().joined(separator: L("、"))
+                     + L("（外接显示器通常不支持软件调亮度）"))
+            blog("bar: " + m); notifyUser(m)
+        }
         startCaff()
         let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             if self?.blacked == true { setBrightness(0.0) }
@@ -867,13 +1049,17 @@ final class ScreenController {
         // 恢复失败不能就此罢休：屏幕会一直黑着。持续重试直到真的亮回来。
         if !restoreBrightness(target) {
             blog("bar: 错误：亮度恢复失败，转入持续重试")
-            notifyUser(L("亮度恢复失败，正在持续重试"))
+            // 走闸门：这条会在每次恢复失败时触发，24 小时内提醒一次就够 ——
+            // 它说的是「屏幕可能回不来了」这一件持续事实，不是每次都不同的新情况。
+            notifyUser(L("亮度恢复失败，正在持续重试"), key: "restore-failed")
             restoreRetry?.invalidate()
             let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] t in
                 guard let self = self else { t.invalidate(); return }
                 if restoreBrightness(target) {
                     blog("bar: 重试成功，亮度已恢复 \(target)")
                     t.invalidate(); self.restoreRetry = nil
+                    // 修好了就开闸：下次再坏掉要能立刻提醒
+                    notifyGateReset("restore-failed")
                 }
             }
             RunLoop.main.add(rt, forMode: .common)
@@ -971,6 +1157,7 @@ final class ScreenController {
 
     // MARK: 生命周期
     func start() {
+        cleanConfigTempFiles()   // 清掉历次异常退出留下的孤儿 tmp
         takeoverServiceSlot()
         killSiblingInstances()   // 用 NSRunningApplication 枚举，不依赖 ps
         // 自愈：上次异常退出遗留的黑屏状态
@@ -998,7 +1185,9 @@ final class ScreenController {
                 // 调用失败（授权过期 / 竞态）。重启一次把它拉回系统级，
                 // 否则用户会一直带着「以为开着其实没开」的错觉合盖。
                 blog("bar: 合盖守护降级为进程级（挡不住合盖睡眠），重启以恢复系统级")
-                _ = setLidAwake(false)
+                // touchPlan: false：这是修进程状态，不是改设置。方案里用户的
+                // 「合盖不睡」必须原样保留，否则一次竞态就把设置擦了。
+                _ = setLidAwake(false, touchPlan: false)
                 _ = setLidAwake(true)
             } else {
                 // 缺助手 / 电量低都在这里被拦下并告知；方案保持不动，
@@ -1012,9 +1201,11 @@ final class ScreenController {
             // 手动敲的命令被 GUI 启动悄悄翻掉，用户只会认为「设置不管用」，
             // 而且他没有任何线索知道该去哪里改回来。
             blog("bar: 当前电源方案不要求合盖运行，停止遗留的合盖守护")
-            _ = setLidAwake(false)
+            _ = setLidAwake(false, touchPlan: false)
             cfg = loadConfig()
-            notifyUser(L("已按当前电源方案停止「合盖不睡」。如需长期保留，请把该方案的「合盖时」设为「保持唤醒」。"))
+            // 这里不弹通知：动作是**按用户自己的方案**做的，用户什么都没操作，
+            // 结果也已经在菜单里（合盖那项显示为「睡眠」）。弹一条 40 字的解释
+            // 只是把「打开软件就弹通知」这件事坐实 —— 属于最该去掉的那类打扰。
         }
 
         // 「保持屏幕常亮」同样是持久标志：重启后按配置恢复，否则用户会以为还开着
@@ -1070,12 +1261,22 @@ final class ScreenController {
         guard p.lid == .nothing else { return }
         // 上次失败的原因若已消失（插上电了 / 助手装好了），就地清掉退避、立刻重试。
         // 不这样的话用户插上电还要干等退避结束，观感就是「设置不管用」。
-        if lidRetryAfter != nil {
+        //
+        // 关键在于**判据必须对准那个原因本身**。旧写法是拿 helperInstalled() 现猜，
+        // 而助手装了却调不通（授权失效）时原因被归成电量问题、电量条件在接电源时
+        // 恒为「已恢复」—— 于是每 15 秒清一次退避、重拉一次、弹一条通知。
+        // 本机实测 2 分钟 8 轮，用户侧的观感就是「这软件老在弹通知」。
+        if lidRetryAfter != nil, let b = lidRetryBlocker {
             let cleared: Bool
-            switch lidRetryBlocker {
-            case "helper":  cleared = helperInstalled()
-            case "battery": cleared = !batteryBlocksStart(cfg)
-            default:        cleared = true
+            switch b {
+            case .battery:     cleared = !batteryBlocksStart(cfg)
+            case .thermal:     cleared = !thermalBlocksStart()
+            case .noHelper:    cleared = helperInstalled()
+            case .helperDead:  cleared = helperUsable()
+            case .noCLI:       cleared = fm.isExecutableFile(atPath: cliPath)
+            // 启动失败没有可查的外部条件，只能等退避到期。
+            // 留这一支是为了让 switch 穷尽：将来加原因时编译器会逼着在这里想一次。
+            case .startFailed: cleared = false
             }
             if cleared { lidRetryAfter = nil; lidRetryBlocker = nil }
         }
@@ -1093,6 +1294,11 @@ final class ScreenController {
 
     /// 终止同 bundle 的其他实例 —— 比 takeoverServiceSlot 更彻底：
     /// 走 NSRunningApplication（进程内），不依赖 ps，也不依赖 service.pid 文件是否干净。
+    ///
+    /// 这里只杀**同 bundle 的菜单栏 App**。合盖守护是独立的 CLI 进程（bundle id 不同），
+    /// 不在这批枚举里，也不会被误杀 —— 它要活过 App 的重启（cfg.lidAwake 的设计前提）。
+    /// 但它持有 disablesleep 期间，旧 App 被强杀就没人能复位那个开关。
+    /// 所以强杀之后必须做一次状态收尾，见 reapOrphanedNosleepState()。
     private func killSiblingInstances() {
         let me = ProcessInfo.processInfo.processIdentifier
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: "com.lidkeep.bar")
@@ -1102,6 +1308,8 @@ final class ScreenController {
             blog("bar: 终止同 bundle 旧实例 pid=\(oldPid)")
             // 先记下旧实例的 caffeinate 子进程：SIGKILL 无法触发其清理逻辑
             let kids = childCaffeinatePids(of: oldPid)
+            // 记下旧实例是否在持有系统级开关：被 SIGKILL 的进程不会跑 stopNosleep
+            let heldSystemSwitch = systemSleepDisabled()
             app.terminate()
             usleep(500_000)
             if app.isTerminated == false {
@@ -1112,7 +1320,30 @@ final class ScreenController {
                 blog("bar: 清理旧实例遗留的 caffeinate pid=\(k)")
                 kill(k, SIGTERM)
             }
+            if heldSystemSwitch { reapOrphanedNosleepState() }
         }
+    }
+
+    /// 旧实例被强杀（没机会跑清理）后的状态收尾。
+    ///
+    /// 只在「本进程确实不持有 disablesleep」时才复位 —— 若合盖守护正在系统级运行，
+    /// 复位它等于把用户「合盖不睡」的配置当场作废，那比留着不变糟糕得多。
+    /// 这时宁可留下 disablesleep=1（用户可 `lidkeep nosleep off` 手动复位），
+    /// 也不要让 App 重启顺手关掉他正在用的功能。
+    private func reapOrphanedNosleepState() {
+        guard systemSleepDisabled() else { return }
+        guard lidDaemonPid() == nil else {
+            // 守护在跑：开关是它的，不能动。顺手把 state 文件对齐到守护的实况，
+            // 否则 doctor 会因为 state 与 pmset 不一致而报一个查不出来的故障。
+            blog("bar: 系统级开关由合盖守护持有，保留现状")
+            return
+        }
+        if let r = helperExec("off"), r == "off" {
+            blog("bar: 旧实例遗留的 disablesleep 已复位")
+        } else {
+            blog("bar: 警告：旧实例遗留的 disablesleep 复位失败，请手动执行 lidkeep nosleep off")
+        }
+        try? fm.removeItem(atPath: nosleepStateFilePath)
     }
 
     private func takeoverServiceSlot() {
@@ -1136,10 +1367,12 @@ final class ScreenController {
     }
 
     /// config.json 被改动（包括用 CLI 修改）时自动重载，无需重启
+    ///
+    /// 判据是 mtime 变化，且严格大于上次记录的基准。**必须是严格大于**：
+    /// 若改成「不等于」，同一秒内两次写入会被反复当成外部改动（见 markConfigOurs）。
     private func reloadConfigIfChanged() {
         guard let a = try? fm.attributesOfItem(atPath: configFile),
               let m = a[.modificationDate] as? Date else { return }
-        var stamp = m
         if let old = configMtime, m > old {
             var newCfg = loadConfig()
             // hotkeyEnabled 也算「需要重装热键」——installHotkey() 正是用它决定注不注册。
@@ -1157,7 +1390,7 @@ final class ScreenController {
             let wasOurs = cfg.lidAwake      // 取值须在 cfg 被覆盖之前，见 reconcileLidDaemon 注释
             if before != (newCfg.autoNosleep, newCfg.keepDisplayOn, newCfg.lidAwake) {
                 blog("bar: 电源方案被外部改动，按当前电源来源重新对齐生效值")
-                saveConfig(newCfg)
+                writeConfig(newCfg)
             }
             cfg = newCfg
             if keyChanged { installHotkey() }
@@ -1171,11 +1404,12 @@ final class ScreenController {
             // 用户下一次在面板里改动任何一项，提交时会把刚重载进来的外部改动整片盖回去。
             onConfigReloaded?()
             // 本轮里自己可能写过盘（投影落盘、守护开关都会写 config）。
-            // 最后统一取一次 mtime 当基准，否则下一轮会把自己的写入当成外部改动，白白再重载一遍。
-            if let a2 = try? fm.attributesOfItem(atPath: configFile),
-               let m2 = a2[.modificationDate] as? Date { stamp = m2 }
+            // writeConfig 已在每次落盘后打了戳，这里再取一次是兜底：
+            // 万一有哪条路径绕过了封装直接调 saveConfig，这里还能兜住一轮。
+            markConfigOurs()
+        } else {
+            configMtime = m
         }
-        configMtime = stamp
     }
 
     private func pumpCommand() {
@@ -1192,10 +1426,60 @@ final class ScreenController {
     }
 
     func shutdown() {
-        restore()
+        // 亮度必须**在进程还活着的时候**恢复完。restore() 失败时会建一个 2s 间隔的重试定时器，
+        // 但 exit(0) 之后定时器再也不会跑 —— 屏幕就永久黑着，而用户刚收到的那条通知
+        // 明写着「正在持续重试」。这是全项目唯一一条确定的永久黑屏路径。
+        //
+        // 所以这里不走 restore()：先取回待恢复的目标值，同步重试若干次，
+        // 仍不成功就把目标值写回 stateFile —— 下次 start() 的自愈路径会接着恢复。
+        let target = cfg.restoreFixed ?? saved
+        if blacked {
+            blacked = false
+            restoreRetry?.invalidate(); restoreRetry = nil
+            if !restoreBrightness(target) {
+                // 同步再试一轮，给 DisplayServices 一点时间（退出瞬间最容易失败）。
+                var recovered = false
+                for i in 0..<3 {
+                    usleep(200_000)
+                    if restoreBrightness(target) { recovered = true; break }
+                    _ = i
+                }
+                if recovered {
+                    blog("bar: 退出前亮度恢复成功 \(target)")
+                    try? fm.removeItem(atPath: stateFile)
+                } else {
+                    // 写回 stateFile：它本来的语义就是「当前黑屏中，原亮度是多少」，
+                    // start() 里的自愈分支读它。留着它 = 下次启动自动恢复，
+                    // 而删掉它 = 用户面对一块永远不亮的屏。
+                    //
+                    // 这一写也必须校验，不能 `try?` 了事 notify「下次会自动恢复」：
+                    // 写不进去的时候磁盘上什么都没有，下次启动什么也不会发生，
+                    // 而用户手里只有一条「下次会自动恢复」的通知 —— 那是在骗他，
+                    // 而且是在唯一一条会永久黑屏的路径上骗他。
+                    // 磁盘满时日志也写不进去，所以**通知**是最后也是唯一能送达的说明。
+                    do {
+                        try String(target).write(toFile: stateFile, atomically: true, encoding: .utf8)
+                        blog("bar: 错误：退出前亮度恢复仍失败，已写入 stateFile 供下次启动自愈")
+                        notifyUser(L("退出前亮度恢复失败，下次启动会自动恢复"))
+                    } catch {
+                        blog("bar: 错误：退出前亮度恢复失败，且自愈记录也写不进去（磁盘可能已满）")
+                        notifyUser(L("退出前亮度恢复失败，记录也没写进去，请手动把亮度调回 "
+                                     + String(format: "%.0f%%", target * 100)
+                                     + L("（否则屏幕会一直黑着）")))
+                    }
+                }
+            } else {
+                blog("bar: 退出前亮度恢复成功 \(target)")
+                try? fm.removeItem(atPath: stateFile)
+            }
+        }
         // 系统级开关是持久的：退出前必须复位，否则退出后系统再也不会睡眠
         stopNosleep(L("程序退出"))
         stopKeepAwakeAssertion()
+        // 上面停了 -is，这里同样要停 -d。两条断言都带 `-w <pid>`，进程一走 caffeinate
+        // 自己也会退，所以这不是泄不泄漏的问题 —— 是**收尾要对称**：只停其中一条，
+        // 下次有人照着这里加第三种断言时就会漏掉第三种，而漏掉的那条不会有任何报错。
+        stopKeepDisplayOn()
         try? fm.removeItem(atPath: serviceFile)
         blog("bar: 退出")
         exit(0)
@@ -1460,9 +1744,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         helperRow.addArrangedSubview(helperBtn)
         helperLabel = wrapLabel("")
         let lidViews: [NSView] = [lidBlackoutBtn, wrapLabel(
-            L("「合盖时熄灭内屏」由合盖守护执行，因此需要先把某套方案里的「合盖时」设为「保持唤醒」；") +
-            L("个别机型熄屏后亮度回不来时，可单独关掉它作为退路。") +
-            L("合盖运行建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。")),
+            L("需先在某套方案里把「合盖时」设为「保持唤醒」；建议接电源使用。")),
             helperRow, helperLabel]
         stack.addArrangedSubview(group(L("合盖运行"), stackOf(lidViews)))
 
@@ -1525,9 +1807,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
 
         stack.addArrangedSubview(group(L("恢复热键"), stackOf([
             hkEnableBtn,
-            wrapLabel(L("关闭后只能用菜单栏点击操作。热键由系统级 Carbon 链路注册，不需要「辅助功能 / 输入监控」授权，也不会因重装 App 而失效。")),
+            wrapLabel(L("关闭后只能用菜单栏点击操作。无需「辅助功能」授权，重装 App 也不会失效。")),
             formRow(L("快捷键"), hkRecorder),
-            wrapLabel(L("点按上面的按钮，再直接按下新组合键即可；⌫ 清除，Esc 取消。系统级热键必须包含 ⌘ / ⌃ / ⌥ / ⇧ 中的至少一个。")),
+            wrapLabel(L("按下新组合键即可；⌫ 清除，Esc 取消。必须含 ⌘ / ⌃ / ⌥ / ⇧ 至少一个。")),
             hkBtnRow,
             hkStatusLabel
         ])))
@@ -1538,7 +1820,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         timeoutPop.target = self; timeoutPop.action = #selector(onTimeoutChanged(_:))
         stack.addArrangedSubview(group(L("自动恢复兜底"), stackOf([
             formRow(L("黑屏后"), timeoutPop),
-            wrapLabel(L("热键失效时的安全网。设为「不启用」则一直保持黑屏，直到手动恢复或退出本程序。"))
+            wrapLabel(L("设为「不启用」则一直保持黑屏，直到手动恢复或退出。"))
         ])))
 
         return scrollable(stack)
@@ -1559,7 +1841,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         sliderRow.addArrangedSubview(battValueLabel)
 
         stack.addArrangedSubview(group(L("电量保护"), stackOf([
-            wrapLabel(L("使用电池且正在放电时，剩余电量降到这个数值就触发下面的动作。拖到 0 表示不限制。插着电源时完全不干预。")),
+            wrapLabel(L("用电池放电时，降到这个数值就触发下面的动作；拖到 0 不限制。接电源时不干预。")),
             formRow(L("阈值"), sliderRow)
         ])))
 
@@ -1586,15 +1868,13 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
             loginBtn,
             autoUpdateBtn,
             wrapLabel(
-                L("后台每 24 小时查一次 GitHub 上的最新版本号；发现新版只在菜单栏打标，不弹窗打断。") +
-                L("请求只读取公开的版本号，不上传任何本机信息。手动「检查更新…」不受这个开关限制。"))
+                L("每 24 小时查一次版本号；发现新版只在菜单栏打标，不弹窗、不上传任何本机信息。"))
         ])))
 
         stack.addArrangedSubview(group(L("安全提醒"), stackOf([
             wrapLabel(
-                L("关屏只是把背光调到 0，画面仍在渲染——这正是远程/屏幕共享仍能使用的原因。")
-                + L("但同样意味着：关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。")
-                + L("离开座位前请手动锁屏（⌃⌘Q）。"))
+                L("关屏只是把背光调到 0，画面仍在渲染：远程桌面因此可用，也让能碰到键鼠的人能盲操作。")
+                + L("离开前请锁屏（⌃⌘Q）。"))
         ])))
 
         let ver = NSTextField(labelWithString: "LidKeep v\(LK_VERSION)  (\(LK_COMMIT))")
@@ -1757,16 +2037,22 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         let onBat = onBatteryNow()
         let curPlan = onBat ? cfg.planBattery : cfg.planAC
         var sum = L("当前：") + powerSourceTitle(battery: onBat) + L(" —— ") + curPlan.summary
-        // 与菜单栏标题同一口径：方案要求合盖不睡却没生效时必须显式说明。
-        // 这里用短版「未生效」——摘要行是单行 label，写全「合盖不睡未生效」
-        // 在三项全开时会顶到卡边缘被截断（宽度实测约 500px，可用只有 ~496px）。
-        if curPlan.lid == .nothing && !ctl.lidOn { sum += L("（未生效）") }
-        // 同一口径：「息屏后保持唤醒」也有装不上断言的时候（电量低于下限），
-        // 用了比菜单更短的措辞，避免与上一个标记叠加后顶到卡边缘被截断
-        if curPlan.keepAwake && !ctl.systemSleepBlocked { sum += L("（息屏唤醒未生效）") }
-        // 同一口径：「保持屏幕常亮」同样会被电量下限拦下（见 startKeepDisplayOn），
-        // 此时勾选框仍是打开的——不标注就等于面板在说谎
-        if curPlan.displayOn && !ctl.keepDisplayOnActive { sum += L("（常亮未生效）") }
+        // 与菜单同一口径：只列**未生效**的那几项，每项后面跟上原因。
+        // 旧写法是三个「未生效」并列，一个原因都不给：用户看完仍然不知道是自己没装
+        // 提权助手、还是电量被拦下、还是正在重试 —— 标注了却仍然要猜，等于没标。
+        // 只列异常项，正常时这一行原样不动，长度也压得住。
+        var inactive: [String] = []
+        if curPlan.lid == .nothing && !ctl.lidOn {
+            inactive.append(L("合盖不睡")
+                            + inactiveMarker(ctl.lidRetryBlocker?.shortReason ?? L("正在重试")))
+        }
+        if curPlan.keepAwake && !ctl.systemSleepBlocked {
+            inactive.append(L("息屏后保持唤醒") + inactiveMarker(ctl.assertionBlockReason()))
+        }
+        if curPlan.displayOn && !ctl.keepDisplayOnActive {
+            inactive.append(L("屏幕常亮") + inactiveMarker(ctl.assertionBlockReason()))
+        }
+        if !inactive.isEmpty { sum += L(" —— ") + inactive.joined(separator: L("；")) }
         planSummaryLabel?.stringValue = sum
         // 文案在 1 行与 2 行之间变化（英文长句会折行），必须让 label 重算固有高度，
         // 否则折行后仍按一行的高度排版，最后一行被裁掉
@@ -1783,14 +2069,11 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
             helperBtn.title = L("卸载提权助手")
             // 过旧的助手缺少「多持有者记账」：关屏联动与手动防睡眠会互相踩掉对方的设置
             helperLabel.stringValue = helperOutdated()
-                ? L("提权助手：版本过旧 —— 缺少多持有者记账，关屏联动与手动防睡眠会互相关掉对方。")
-                  + L("请卸载后重新安装（需要输入一次登录密码）。")
-                : L("提权助手：已安装 —— 防睡眠可覆盖电池供电与合盖。") +
-                  L("（仅授权单个 root:wheel 脚本的四个固定参数）")
+                ? L("提权助手：版本过旧，请卸载后重装（关屏联动与手动防睡眠会互相干扰）。")
+                : L("提权助手：已安装（可覆盖电池与合盖；仅授权一个脚本的四个固定参数）")
         } else {
             helperBtn.title = L("安装提权助手…")
-            helperLabel.stringValue = L("提权助手：未安装 —— 此时防睡眠仅在本机接电源时有效，") +
-                L("电池供电与合盖仍会睡眠。安装需输入登录密码，只授权一个脚本的四个固定参数。")
+            helperLabel.stringValue = L("提权助手：未安装（防睡眠仅接电源时有效，电池与合盖仍会睡眠；安装需输入登录密码）")
         }
         helperLabel.needsLayout = true
     }
@@ -1856,7 +2139,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         _ = ctl.setLidAwake(false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self else { return }
-            if self.ctl.setLidAwake(true) {
+            if self.ctl.setLidAwake(true) == nil {
                 self.cfg = self.ctl.cfg
                 self.syncFromConfig()
             } else {
@@ -1990,7 +2273,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         c.batteryAction = cfg.batteryAction
         c.lidBlackout = cfg.lidBlackout
         c.autoCheckUpdate = cfg.autoCheckUpdate
-        saveConfig(c)
+        ScreenController.shared.writeConfig(c)
         cfg = c
         ctl.cfg = c
         ctl.reloadHotkey()
@@ -2255,30 +2538,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 电源方案：父项只写一行短状态（例：「状态：电源保持唤醒」），子项按当前那套方案打勾。
         // 旧写法把「电源来源 + 三项摘要 + 生效范围」全串进标题，三项全开时长达 40 余字，
         // 在菜单里被截成读不完的残句 —— 等于什么都没说。逐项明细就在子菜单里（带勾选），
-        // 不必也不该挤在标题上。下面的「未生效」标记只在异常态才追加：正常时它就很短。
+        // 不必也不该挤在标题上。
+        //
+        // 「未生效」标在**对应的那一行**上，并写明原因。用户要判断的是「我勾的那项到底起没起」，
+        // 标记全堆在父项上，他得自己把「合盖不睡未生效」对应回是哪一行；只说「未生效」不说
+        // 为什么，等于把排查工作退还给用户。父项只在真有项不对劲时挂一个 ⚠ 提示下一层有情况。
         let onBat = onBatteryNow()
         let plan = activePlan(ctl.cfg)
-        var modeTitle = planStatusTitle(plan, battery: onBat)
-        if plan.lid == .nothing && !ctl.lidOn {
-            // 方案要合盖不睡、守护却没在跑：必须在这里说清楚。
-            // 菜单是用户唯一的常驻视图，标题说「合盖不睡」而机器实际会睡，
-            // 就是最典型的那种「UI 说一套、机器做一套」。
-            modeTitle += L("（合盖不睡未生效）")
-        }
-        if plan.keepAwake && !ctl.systemSleepBlocked {
-            // 同一条原则：方案要「息屏后保持唤醒」、断言却没持有（多半是电量低于下限），
-            // 菜单上不说清楚，用户就会以为设置生效着，机器却在包里睡着了。
-            modeTitle += L("（息屏保持唤醒未生效）")
-        }
+        let lidInactive  = plan.lid == .nothing && !ctl.lidOn
+        let keepInactive = plan.keepAwake && !ctl.systemSleepBlocked
+        let dispInactive = plan.displayOn && !ctl.keepDisplayOnActive
+        modeItem.title = (lidInactive || keepInactive || dispInactive ? "⚠ " : "")
+            + planStatusTitle(plan, battery: onBat)
         if blacked && ctl.nosleepOn {
-            modeTitle += ctl.nosleepSystemOn ? L("（已生效 · 系统级）") : L("（已生效 · 仅接电源）")
+            // 这条不是异常，是范围说明：黑屏联动持有的断言可能护着整个系统，也可能只护接电态。
+            modeItem.title += ctl.nosleepSystemOn ? L("（已生效 · 系统级）") : L("（已生效 · 仅接电源）")
         }
-        modeItem.title = modeTitle
         keepAwakeItem.state = plan.keepAwake ? .on : .off
         displayOnItem.state = plan.displayOn ? .on : .off
-        lidItem.title = L("合盖时：") + plan.lid.title
+        // 合盖不睡还没起来：原因取最后一次拉起失败的真实原因（可能是「需先装提权助手」，
+        // 也可能只是「正在重试」）—— 写具体原因，用户才知道要不要自己动手。
+        lidItem.title = lidInactive
+            ? L("合盖时：") + plan.lid.title
+                + inactiveMarker(ctl.lidRetryBlocker?.shortReason ?? L("正在重试"))
+            : L("合盖时：") + plan.lid.title
+        keepAwakeItem.title = keepInactive
+            ? L("息屏后保持唤醒") + inactiveMarker(ctl.assertionBlockReason())
+            : L("息屏后保持唤醒")
+        displayOnItem.title = dispInactive
+            ? L("保持屏幕常亮") + inactiveMarker(ctl.assertionBlockReason())
+            : L("保持屏幕常亮")
         for (a, it) in lidItems { it.state = (a == plan.lid) ? .on : .off }
-        lidRetryItem?.isHidden = !(plan.lid == .nothing && !ctl.lidOn)
+        lidRetryItem?.isHidden = !lidInactive
         setupItem.isHidden = helperInstalled()
         loginItem?.state = isLoginItemEnabled() ? .on : .off
         if hotkeyUnavailable {
@@ -2409,9 +2700,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func promptInstallHelper() {
         let alert = NSAlert()
         alert.messageText = L("「合盖后不睡眠」需要提权助手")
-        alert.informativeText = L("合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。") +
-            L("点击「一键防睡眠」安装（弹一次系统密码框，仅授权单个脚本的固定参数）。") +
-            L("装好后「合盖不睡」会自动生效，无需再点。")
+        alert.informativeText = L("合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。")
+            + L("安装会弹一次系统密码框，装好后自动生效，无需再点。")
         alert.addButton(withTitle: L("一键安装并开启"))
         alert.addButton(withTitle: L("取消"))
         if alert.runModal() == .alertFirstButtonReturn { runSetup(nil) }
@@ -2424,11 +2714,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let ok = ctl.reconcileLidDaemon(want: true, why: "菜单手动重试", force: true)
         if ok {
             notifyUser(L("「合盖不睡」已生效。"))
-        } else if !helperInstalled() {
+        } else if ctl.lidRetryBlocker == .noHelper {
+            // 缺助手是唯一一个用户必须动手才能解决的原因，直接给安装入口
             promptInstallHelper()
         } else {
-            notifyUser(L("「合盖不睡」未能生效：") +
-                       L("可能原因：电池电量低于下限 / 守护启动未确认。\n详见「打开日志」。"))
+            // 原因取自这次失败本身，不再写「可能原因：A / B」的猜测清单 ——
+            // 猜错会把人引到错误的方向，而真实原因就在手边。
+            let why = ctl.lidRetryBlocker?.shortReason ?? L("未知原因")
+            notifyUser(L("「合盖不睡」未能生效：") + why)
         }
         refreshUI()
     }
@@ -2574,7 +2867,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             // 网络请求回来时可能已过好几秒，这期间 CLI 可能改过配置。
             // 回写内存里那份快照会把对方的改动一起抹掉，所以只重读后改这一个时间戳。
-            updateConfig { $0.lastUpdateCheckAt = Date().timeIntervalSince1970 }
+            ScreenController.shared.patchConfig { $0.lastUpdateCheckAt = Date().timeIntervalSince1970 }
             self.ctl.cfg = loadConfig()
             guard self.isVersion(latest, newerThan: LK_VERSION) else {
                 blog("bar: 自动检查更新 已是最新（本机 v\(LK_VERSION)）")

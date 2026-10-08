@@ -32,6 +32,10 @@ OWNDIR=/var/db/lidkeep-nosleep
 
 # 找到真正的调用者 pid：本脚本的祖先链是 helper -> sudo -> 调用者。
 # 逐级上溯并跳过 sudo 自身，取第一个非 sudo 的进程。
+#
+# ps 被限时 ppid 取不到、循环中断，返回空 —— 这是调用方唯一能观测到的信号。
+# 所以三个分支（on / off / detect）都必须区分「没取到 pid」与「取到了 pid 0」，
+# 不能一律当成「没有调用者」：那会让 on 少记一次账、off 少销一次账。
 caller_pid() {
     p=$$
     i=0
@@ -47,13 +51,29 @@ caller_pid() {
 
 # 清理已失效的持有者：进程已退出，或 pid 已被系统复用给别的程序。
 # 不清会让崩溃残留的持有者把系统永久留在「永不睡眠」状态——这是同类工具最常见的翻车方式。
+#
+# 判据必须是「这个 pid 还活着吗」，而不是「ps 说它叫什么」。
+# 原实现是 `case "$(ps -o comm= -p $opid)" in *lidkeep*|*)`，而 ps 在受限环境下
+# 会返回空字符串（setuid 程序可能被拒），于是 case "" 落进 *) 分支把**每一个**
+# 持有者都删掉 —— 计数归零 → 下一个 off 直接 disablesleep 0，
+# 把仍在运行的守护所依赖的防睡眠一并关掉。这与 SystemState.swift 里
+# 「受限环境 ps 会被拒，读状态必须走无权限通道」那段注释自相矛盾。
+#
+# 现在改成两步：先用 kill -0 判断存活（无权限需求），只有确认还活着才去看进程名；
+# 而进程名读不出来时一律**保留** —— 误留一个持有者只是多保持一会儿防睡眠，
+# 误删会让别人正在跑的任务失去防睡眠，后者不可逆。
 prune_owners() {
     [ -d "$OWNDIR" ] || return 0
     for f in "$OWNDIR"/*; do
         [ -e "$f" ] || continue
         opid=${f##*/}
         case "$opid" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
-        case "$(/bin/ps -o comm= -p "$opid" 2>/dev/null)" in
+        # 进程不在了才删。这是唯一在「ps 被拒」时依然成立的判据。
+        /bin/kill -0 "$opid" 2>/dev/null || { rm -f "$f"; continue; }
+        # 还活着：查它是不是我们家的进程。查不出来就当是自己人，保守保留。
+        comm=$(/bin/ps -o comm= -p "$opid" 2>/dev/null | tr -d ' ')
+        [ -n "$comm" ] || continue
+        case "$comm" in
             *lidkeep*|*LidKeep*) ;;
             *) rm -f "$f" ;;
         esac
@@ -84,7 +104,14 @@ case "$1" in
         prune_owners
         /bin/mkdir -p "$OWNDIR" 2>/dev/null && /bin/chmod 700 "$OWNDIR"
         c=$(caller_pid)
-        if [ -n "$c" ]; then : > "$OWNDIR/$c" 2>/dev/null; fi
+        if [ -n "$c" ]; then
+            : > "$OWNDIR/$c" 2>/dev/null
+        else
+            # 记账失败但开关已经开了：这条持有者下次 off 时销不掉，
+            # owner_count 会一直把它算进去 —— 结果是「别人关了防睡眠也不复位」，
+            # 比误关更隐蔽。明确告警，让调用方能提示用户手动 reset。
+            echo "$LOG_TAG: 警告：无法确定调用者 pid，本次开启未记账；如需复位请手动执行 pmset disablesleep 0" >&2
+        fi
         echo "on"
         ;;
     off)

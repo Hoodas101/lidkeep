@@ -16,7 +16,7 @@ jobs:
       - name: Build universal binaries (arm64 + x86_64)
         run: make all
 
-      - name: Smoke test（端到端冒烟，含参数校验 / 配置往返 / 资产一致性）
+      - name: Test (l10n key coverage + source-level regression + end-to-end smoke)
         run: make test
 
       - name: Show doctor report

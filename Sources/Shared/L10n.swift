@@ -20,14 +20,19 @@ enum L10n {
     /// （构建侧用 wildcard 收 Sources/Shared/L10n*.swift，不用改 Makefile）。
     static let supported = ["zh", "en", "ja", "ko", "de", "fr", "es"]
 
-    /// 当前语言。惰性求值一次，之后不再变。
-    static let lang: String = {
+    /// 当前语言。
+    ///
+    /// 刻意做成 **computed 而不是 `static let`**：`static let` 在首次访问时求值一次就固定，
+    /// 于是常驻进程里 `lidkeep config --lang en` 改完配置后界面语言不变 —— 用户看到
+    /// 「命令行说改好了、界面还是旧语言」，两边对不上。computed 每次重新读取
+    /// （systemPreferred 有缓存，实测开销可忽略），配置一改就跟着变。
+    static var lang: String {
         if let v = ProcessInfo.processInfo.environment["LIDKEEP_LANG"], let m = normalize(v) {
             return m
         }
         if let v = configuredLang(), let m = normalize(v) { return m }
         return systemPreferred() ?? "en"
-    }()
+    }
 
     /// 界面语言是否为中文。给「只有中/英两套」的长帮助文本用（那些是多行字面量，
     /// 不走文案表）。判据必须是 isChinese 而不是 isEN —— 若写成「是英文吗」，
@@ -35,9 +40,13 @@ enum L10n {
     static var isChinese: Bool { lang == "zh" }
 
     /// 拼接短句时要不要留分隔符。
-    /// 中/日/韩可以直连（「状态：电源保持唤醒」），拉丁字母语言必须留，
+    /// 中文、日文可以直连（「状态：电源保持唤醒」），拉丁字母语言必须留，
     /// 否则会连成 "Status: PowerKeep awake"。
-    static var needsWordSeparator: Bool { !["zh", "ja", "ko"].contains(lang) }
+    ///
+    /// 韩语**不在**直连名单里：韩文按词空格分写，直连会拼出
+    /// 「전원잠자지 않기」这种没有词界的字符串。这一条原先漏了，
+    /// 菜单第一行在韩语下一直是粘在一起的。
+    static var needsWordSeparator: Bool { !["zh", "ja"].contains(lang) }
 
     /// 语言代码的显示名（用当前界面语言书写）。CLI 的 `config` 回显与设置面板共用。
     /// 代码 → 名字的映射只有这一处，免得 CLI 与 App 各拼一套、加语言时漏改一边。
@@ -117,4 +126,13 @@ func L(_ zh: String) -> String {
     default: break
     }
     return L10nEN[zh] ?? zh
+}
+
+/// 「（未生效：原因）」这一段的唯一拼装处。菜单与设置面板共用，
+/// 免得两边各拼一遍、加语言时漏改一处。
+///
+/// 括号必须走文案表而不是写死全角：英文里 `（未生效：` 译成 ` (not active: `，
+/// 收尾的 `）` 译成 `)`。写死全角会让英文界面出现「(not active: …）」这种混搭。
+func inactiveMarker(_ reason: String) -> String {
+    L("（未生效：") + reason + L("）")
 }

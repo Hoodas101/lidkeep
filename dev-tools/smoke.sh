@@ -103,6 +103,39 @@ reject "负数超时 -1"           "$B" config --timeout -1
 reject "非法恢复策略 abc"       "$B" config --restore abc
 reject "无修饰键热键"          "$B" config --mods "" --key 0
 
+# 未知参数：以前整条被跳过、命令正常走完、退出码 0、配置一个字节没改。
+# 最容易踩的是拼错选项名（--battary 少一个 e）—— 用户看到的是「我明明设了」。
+reject "config 拼错的选项名"    "$B" config --battary 50
+reject "config 属于 plan 的选项" "$B" config --keep-awake on
+reject "plan 拼错的选项名"      "$B" plan --keepwake on
+reject "daemon 拼错的选项名"    "$B" daemon --timeot 5
+reject "nosleep on 拼错的选项名" "$B" nosleep on --syste
+
+# 漏值：以前掉进「未知参数」分支（i+1 不存在 → 整条跳过），报错还会指错地方。
+reject "config --battery 漏值"  "$B" config --battery
+reject "config 值后面紧跟选项"  "$B" config --battery --hotkey
+reject "plan --lid 漏值"        "$B" plan --lid
+
+# ⚠️ 反向断言：这些**必须仍然可用**。加未知参数校验时最容易误伤的就是它们 ——
+# `--battery` 在 config 后面跟数字、在 plan 后面什么都不跟（选「使用电池」那套方案）。
+# 用一份全局的「取值选项」集合去判漏值，`plan --ac --battery` 就会被报成
+# 「--battery 需要一个值」而拒绝 —— 而那是 help 里写着的合法用法。
+# 这条断言就是为那个坑留的，改参数解析时别删。
+#
+# 只用**不写盘**的组合（不给 --keep-awake / --display-on / --lid）：这些断言要的是
+# 「参数被接受」这一件事，而 plan 的写入会把 autoNosleep 等字段按当前电源来源重算，
+# 污染后面用例读到的配置。写入行为由【3】的配置往返负责。
+accept() {  # $1=描述  $2..=命令
+    local d="$1"; shift
+    "$@" >/dev/null 2>&1
+    [ $? -eq 0 ] && ok "接受 $d" || bad "拒绝了合法用法：$d"
+}
+accept "config 无参数"              "$B" config
+accept "plan 无参数"                "$B" plan
+accept "plan --ac --battery"        "$B" plan --ac --battery
+accept "plan --batt 短写"           "$B" plan --batt
+accept "nosleep status"             "$B" nosleep status
+
 # ---------- 3. 配置往返 ----------
 echo
 echo "【3】配置读写往返"
@@ -499,20 +532,29 @@ echo "【13】保持屏幕常亮的电量下限释放（需 SMOKE_FULL=1 且 App
 # 那是**假失败**，不是代码回归。跑前先 `make install`，再让 App 重启（launchd 会自动拉起）。
 # 【14】没有这个前提：它测的 keepCaff 拦截在更早的版本里就已存在。
 display_caff_cmd() {
-    for p in $(pgrep -x caffeinate 2>/dev/null); do
-        pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-        case "$(ps -o command= -p "$pp" 2>/dev/null)" in
-            *LidKeep*) ps -o command= -p "$p" 2>/dev/null | grep 'caffeinate -d -w' ;;
-        esac
-    done
+    # 走 caff-args（sysctl KERN_PROCARGS2，进程内读），不用 ps。
+    # 本机 ps 是 setuid 程序，受限环境拒绝执行 → 这两组用例长期以
+    # 「本环境 ps 不可用」被跳过，而它们守的是「电量放到自动关机而保护不介入」。
+    # 守护唯一性、遗留清理那些守卫当初改用 sysctl 就是同一个理由（见 Ownership.swift）。
+    # 需要 `make dev-tools` 先编出 build/dev-tools/caff-args。
+    [ -x build/dev-tools/caff-args ] || return 0
+    build/dev-tools/caff-args -d
 }
 if [ "${SMOKE_FULL:-0}" != "1" ]; then
     skip_ "常亮的电量释放" "默认跳过，设 SMOKE_FULL=1 启用"
 elif [ "$has_service" -eq 0 ]; then
     skip_ "常亮的电量释放" "该断言由菜单栏 App 持有，需 App 常驻"
-elif [ "$HAVE_PS" = "0" ]; then
-    skip_ "常亮的电量释放" "本环境 ps 不可用，分不开 -d / -is / -dis 三条断言"
+elif [ ! -x build/dev-tools/caff-args ]; then
+    skip_ "常亮的电量释放" "缺 build/dev-tools/caff-args，先跑 make dev-tools"
 else
+    # 【13】【14】跑之前把热守卫**钉住**。这两组验的是电量守卫，可 thermalBlocksStart()
+    # 也在同一批断言的准入条件里，且它的仿真钩子只在文件**不存在**时才回落到真实
+    # ProcessInfo.thermalState —— 一台刚跑完密集测试的机器真实温度已经是 serious，
+    # 于是热保护在同一个观察窗口里把断言全撤了，【14】报「断言仍在持有」而日志明写
+    # 「设备过热 —— 过热保护触发」。判据本身没错，是环境在插手。
+    #
+    # 【16】自己会写这个文件，所以这里必须排在它前面、且由它自己收尾。
+    printf 'nominal' > "$SUP_DIR/_sim-thermal"
     printf '80,ac,charging' > "$SUP_DIR/_sim-battery"
     "$B" config --battery 20 >/dev/null 2>&1
     "$B" config --battery-action 0 >/dev/null 2>&1      # 触底：只恢复屏幕（也必须放开常亮）
@@ -535,6 +577,7 @@ else
             bad "电量低于下限已 60 秒，常亮断言仍在持有（若常驻的是旧版 App，请先 make install 再跑）"
         fi
     fi
+    # _sim-thermal **不清**：它要留给【14】（同样是电量守卫的用例），由【16】收尾。
     rm -f "$SUP_DIR/_sim-battery"
     "$B" plan --display-on off >/dev/null 2>&1
 fi
@@ -546,32 +589,39 @@ echo "【14】息屏保持唤醒的电量下限释放（需 SMOKE_FULL=1 且 App
 # keepCaff 是**长期**持有的断言（不像黑屏那条只活几秒），守卫若漏掉它，
 # 掀盖息屏后机器会一路放电到关机，而菜单栏上看起来一切正常。
 #
-# 这里为什么仍要 ps：doctor 只报断言持有者（caffeinate）的 pid，不报它是谁拉起来的，
-# 而合盖守护**也**持有 caffeinate —— 不区分就会在 App 已经释放之后仍看到守护那条，
-# 把正常状态判成失败。假警报比没有警报更糟，所以无 ps 时如实跳过，不猜。
-# （【6】已经在无需 ps 的前提下守住了「开关不是空转 + 归属判定不许依赖被拒的命令」。）
+# 这里为什么需要区分 caffeinate 的参数：doctor 只报断言持有者（caffeinate）的 pid，
+# 不报它是谁拉起来的，而合盖守护**也**持有 caffeinate —— 不区分就会在 App 已经释放
+# 之后仍看到守护那条，把正常状态判成失败。假警报比没有警报更糟。
 keep_caff_pids() {
-    for p in $(pgrep -x caffeinate 2>/dev/null); do
-        pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-        case "$(ps -o command= -p "$pp" 2>/dev/null)" in
-            *LidKeep*) ps -o command= -p "$p" 2>/dev/null;;
-        esac
-    done
+    # 同 display_caff_cmd：走 sysctl 而不是 ps，理由见那里的注释。
+    # 这里要 -is（息屏后保持唤醒），与 -d / -dis 分开 —— 三条断言形如
+    # `caffeinate -d -w <pid>` / `-is` / `-dis`，不精确匹配就会互相干扰。
+    [ -x build/dev-tools/caff-args ] || return 0
+    build/dev-tools/caff-args -is
 }
 if [ "${SMOKE_FULL:-0}" != "1" ]; then
     skip_ "息屏保持唤醒的电量释放" "默认跳过，设 SMOKE_FULL=1 启用"
 elif [ "$has_service" -eq 0 ]; then
     skip_ "息屏保持唤醒的电量释放" "该断言由菜单栏 App 持有，需 App 常驻"
-elif [ "$HAVE_PS" = "0" ]; then
-    skip_ "息屏保持唤醒的电量释放" "本环境 ps 不可用，分不开 App 的断言与合盖守护的"
+elif [ ! -x build/dev-tools/caff-args ]; then
+    skip_ "息屏保持唤醒的电量释放" "缺 build/dev-tools/caff-args，先跑 make dev-tools"
 else
+    # 同【13】：把热守卫钉住。本组即使在【13】被跳过的情况下也会独立跑，
+    # 所以不能依赖【13】留下的状态。
+    printf 'nominal' > "$SUP_DIR/_sim-thermal"
     printf '80,ac,charging' > "$SUP_DIR/_sim-battery"
     "$B" config --battery 20 >/dev/null 2>&1
     "$B" config --battery-action 1 >/dev/null 2>&1      # 触底：恢复并撤销防睡眠
-    "$B" plan --ac --keep-awake on >/dev/null 2>&1
-    sleep 5
+    # 两套方案都开，**不要**写 --ac。App 按**当前电源来源**对应的那套方案办事：
+    # 只开 AC 的话，上一段用例若把机器留在电池状态（_sim-battery 写 batt 即触发），
+    # 这里改 AC 方案对 App 没有任何作用，断言永远装不上 —— 而skip_ 会报
+    # 「断言未装上（无可用亮度接口或助手缺失）」，那个理由与本用例毫无关系，
+    # 排错方向会被带偏。同一时刻 App 可能还在等巡检周期，所以多等一轮。
+    "$B" plan --keep-awake on >/dev/null 2>&1
+    sleep 8
     if [ -z "$(keep_caff_pids)" ]; then
-        skip_ "息屏保持唤醒的电量释放" "断言未装上（无可用亮度接口或助手缺失）"
+        # 如实说明观测到的事实，不猜原因：电量/温度可能把它拦下了（读 App 日志末几行）。
+        skip_ "息屏保持唤醒的电量释放" "断言未装上（可能被电量下限或热保护拦下，见 App 日志）"
     else
         printf '10,batt,discharging' > "$SUP_DIR/_sim-battery"
         released=0
@@ -583,7 +633,9 @@ else
                               || bad "电量低于下限已 44 秒，断言仍在持有"
     fi
     rm -f "$SUP_DIR/_sim-battery"
-    "$B" plan --ac --keep-awake off >/dev/null 2>&1
+    # 与上面成对：两套方案都开了，收尾也必须两套都关，否则电池方案上的
+    # keepAwake 会漏给后面的用例（【16】还会自己开，那是它自己的事）。
+    "$B" plan --keep-awake off >/dev/null 2>&1
 fi
 
 # ---------- 15. 进程归属判定：只认可执行文件，不认命令行 ----------
@@ -661,10 +713,15 @@ else
     "$B" plan --keep-awake on >/dev/null 2>&1
     sleep 5
     plan_before=$("$B" plan 2>/dev/null)
+    # 只看本次用例之后新增的行（日志按 256KB 轮转，两分钟内不可能转）
+    #
+    # 定义必须排在下面那次调用**之前**。原先它写在调用下面一行，bash 运行时才解析
+    # 函数体，于是 698 行那次调用报 "newlog: command not found"、had_keepawake 恒为 0，
+    # ②b 那条断言（-is 断言是否一并放开）被静默跳过 —— 而它守的恰好是历史上真出过的 bug。
+    # 脚本不设 -e，这种错误只会打在 stderr 里混过去，看起来全绿。
+    newlog() { tail -n +$((base + 1)) "$APP_LOG" 2>/dev/null; }
     had_keepawake=0
     newlog | grep -q "息屏后保持唤醒已生效" && had_keepawake=1
-    # 只看本次用例之后新增的行（日志按 256KB 轮转，两分钟内不可能转）
-    newlog() { tail -n +$((base + 1)) "$APP_LOG" 2>/dev/null; }
     if ! newlog | grep -q "保持屏幕常亮已开启"; then
         skip_ "过热保护" "常亮断言未装上（无可用亮度接口），热守卫无对象可管"
     else
@@ -720,11 +777,25 @@ fi
 # ---------- 17. 脚本写法 ----------
 echo
 echo "【17】脚本写法（变量名后不得紧跟非 ASCII）"
-# 为什么单独立一条：macOS 自带的 /bin/bash 是 3.2，它会把紧贴变量名的多字节字符
-# 的字节吃进变量名 —— 变量后面紧跟一个全角括号，那个括号就会被算进变量名，于是
+# 改这个脚本（或 regress.sh）之前先看这三条，都是在本机真踩过的：
+#
+# ① 变量名后不得紧跟非 ASCII 字符。macOS 自带的 /bin/bash 是 3.2，它会把紧贴变量名的
+#    多字节字符的字节吃进变量名 —— 变量后面紧跟一个全角括号，那个括号就会被算进变量名，于是
 # `set -u` 下直接报 unbound variable。而在 bash 4+ / zsh 里完全正常：交互式敲
 # 一遍看不出问题，只有真跑脚本才炸。这类「假绿灯」只能靠静态扫描拦下来。
 # 正解：写成 ${VAR} 形式，把变量边界写死。
+#
+# ② 函数定义必须排在第一次调用**之前**。bash 在运行时才解析函数体，所以定义写在
+#    调用下面一行不是语法错 —— 只在跑到那里时打一句 "xxx: command not found"。
+#    本脚本没有 set -e，那句错误混在输出里就被忽略了，依赖它的断言恒为假而被跳过，
+#    报告照样全绿。newlog() 曾因此让「-is 断言是否一并放开」那条断言从没过，而它守的
+#    正是 releaseForThermal 真实出过的 bug。regress.sh 里有行号断言盯着这件事。
+#
+# ③ 脚本正在运行时不要编辑它（也不要改它的输入）。bash 按字节偏移增量读取脚本，
+#    不是先读全文件；中途改文件会让后续部分整体错位，把注释行当命令执行、并报出
+#    一串莫名其妙的 syntax error。那次的结果已经不可信，要改就等跑完再改，改完重跑。
+#    （与「编译期间别改 Swift 源文件」是同一个道理：swiftc 报 input file was modified
+#    during the build，bash 则静默错位。）
 if command -v python3 >/dev/null 2>&1; then
     GLUE=$(python3 - <<'PYEOF'
 import pathlib

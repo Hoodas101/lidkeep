@@ -6,6 +6,7 @@
 #   make uninstall  卸载以上两者（含 launchd 登录项）
 #   make dev-tools  编译开发调试小工具到 build/dev-tools/
 #   make l10n-audit 多语言拼接审计（改文案 / 加语言后手动跑，不在 make test 里）
+#   make copy-preview 把拼接文案按七种语言打印出来，人工核对（同上，手动跑）
 #   make clean
 # 自检脚本：dev-tools/check-l10n.py（文案键覆盖与漏翻，由 make test 强制）、
 #           dev-tools/audit-l10n-concat.py（片段拼接，手动）、
@@ -32,7 +33,7 @@ endif
 APPSRC  = build/LidKeep.app
 DEST    = /Applications/LidKeep.app
 
-.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test l10n-audit clean icon
+.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test regress l10n-audit copy-preview clean icon
 
 all: cli app
 
@@ -68,15 +69,38 @@ icon:
 # 端到端冒烟测试：构建后跑真实关屏/恢复/防睡眠路径（会短暂黑屏约 4 秒）
 # 前置跑一次文案键自检：漏翻的键在中文环境下看不出问题，只有英文用户会看到中文，
 # 属于「作者测不出来」的一类 bug，必须机器兜住。
-test: cli
+#
+# 依赖 dev-tools：smoke.sh 的【13】【14】要用 build/dev-tools/caff-args 区分
+# -d / -is / -dis 三条 caffeinate 断言。工具缺失时它们会以「缺工具」跳过 ——
+# 干净检出后第一次跑 `make test` 就少两条覆盖，而报告不会显得异常。
+#
+# 三层，从快到慢、从静态到动态：键覆盖 → 源码结构断言 → 真实端到端。
+# regress.sh 只读、不碰屏幕、几秒跑完，所以串在这里而不是留一个没人记得跑的
+# 目标：那 58 条断言是「这批修复会不会被后人改回去」的唯一守卫，写成孤儿
+# 目标就等于没写。单跑用 `make regress`。
+test: cli dev-tools
 	@python3 dev-tools/check-l10n.py .
+	@./dev-tools/regress.sh
 	@./dev-tools/smoke.sh
+
+# 源码结构断言（regress.sh，58 条）。改完源码想快速自查时单跑这个。
+regress: cli dev-tools
+	@./dev-tools/regress.sh
 
 # 多语言**拼接**审计：`L("A") + 值 + L("B")` 拼起来会不会粘连、括号引号有没有错位。
 # 刻意不进 make test：报告 200+ 行，且最后一段「引号边界」必须人工判断配对，
 # 塞进 CI 只会把真正的失败淹掉。改文案 / 加语言之后手动跑，退出码非 0 即硬缺陷。
 l10n-audit:
 	@python3 dev-tools/audit-l10n-concat.py .
+
+# 把拼出来的文案按七种语言渲染一遍，人工核对语序、空格、括号。
+# check-l10n.py 只能证明每个**片段**都有译文，证明不了拼完读得通。
+# 顶层代码要求文件必须叫 main.swift，所以它单独放一个目录。
+copy-preview:
+	@mkdir -p build
+	@swiftc -O $(wildcard Sources/Shared/L10n*.swift) dev-tools/preview-copy/main.swift \
+		-o build/preview-copy
+	@for l in zh en ja ko de fr es; do LIDKEEP_LANG=$$l ./build/preview-copy; done
 
 # 通用规则：单文件 Swift 程序按架构分别编译后 lipo 合并
 # $(1)=源文件 $(2)=中间产物名 $(3)=输出路径
@@ -96,7 +120,8 @@ endef
 # 不必再回来改这里 —— 少一处要同步的地方，就少一类「加了语言却漏加进构建」的错。
 SHARED := Sources/Shared/Version.swift $(wildcard Sources/Shared/L10n*.swift) \
           Sources/Shared/Config.swift Sources/Shared/PowerPlan.swift \
-          Sources/Shared/SystemState.swift Sources/Shared/Ownership.swift
+          Sources/Shared/SystemState.swift Sources/Shared/Ownership.swift \
+          Sources/Shared/Notify.swift
 cli: version-file
 	$(call compile-universal,Sources/CLI/main.swift $(SHARED),lidkeep,build/lidkeep)
 
@@ -145,6 +170,10 @@ dev-tools:
 	@for f in dev-tools/*.swift; do \
 		$(CC) -O -target arm64-apple-macosx13.0 $$f -o build/dev-tools/$$(basename $${f%.swift}); \
 	done
+	@# caff-args 必须带上 Ownership.swift —— 它复用那里的 procCommandLine /
+	@# pidIsCaffeinate 来读断言参数。放进子目录是因为 Swift 顶层代码要求文件叫 main.swift。
+	@$(CC) -O -target arm64-apple-macosx13.0 Sources/Shared/Ownership.swift \
+		dev-tools/caff-args/main.swift -o build/dev-tools/caff-args
 	@echo "==> 开发工具已编译到 build/dev-tools/"
 
 clean:
