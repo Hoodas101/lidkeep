@@ -56,7 +56,7 @@ Day to day you only touch two of them; the rest live in **Settings…** and the 
 | **Turn Display Off** | Cuts the backlight outright, so the screen goes fully black, and the machine keeps running. Click it, or press ⌃⌥⌘B |
 | **Status: … ▸** | Everything else. The title *is* the current status; open it to configure the power source in use |
 
-**Power plans work like Windows "Power Options."** Plugged-in and on-battery settings are stored separately, and they swap within seconds of unplugging. Each plan has three switches that don't conflict: *stay awake after the display sleeps*, *keep the display on*, *when the lid closes*. If a plan can't take effect (helper missing, battery low, machine hot) the title says so, and the app starts it as soon as conditions allow. Full detail in [docs/DETAILS.md](docs/DETAILS.md#usage).
+**Power plans work like Windows "Power Options."** Plugged-in and on-battery settings are stored separately, and they swap within seconds of unplugging. Each plan has three switches that don't conflict: *stay awake after the display sleeps*, *keep the display on*, *when the lid closes*. If a switch can't take effect (helper missing, battery low, machine hot) its own row is marked **not active** and says why, the parent row carries a `⚠`, and the app starts it as soon as conditions allow. Full detail in [docs/DETAILS.md](docs/DETAILS.md#usage).
 
 - **Remote host** (ToDesk / VNC / SSH). Run `lidkeep off` and leave it. If you forget to restore, the 12-hour fallback brings the display back.
 - **Closed in a bag.** Set **When the lid closes ▸ Keep awake**. The panel goes dark; downloads and builds continue.

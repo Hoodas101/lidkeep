@@ -47,9 +47,22 @@ external packages.
 
 ## Testing
 
-`make test` runs `dev-tools/smoke.sh`. It skips cases the current environment
-can't safely run (e.g. a real blackout while the menu bar app is live — that
-would interrupt your session). To cover everything, run it **twice**:
+`make test` runs three layers, ordered fast → slow and static → dynamic:
+
+```bash
+make test    # 1. check-l10n.py  — key coverage across all six tables (blocking)
+             # 2. regress.sh     — 58 source-level assertions on the fixes above
+             # 3. smoke.sh       — end-to-end, real blackout / anti-sleep paths
+```
+
+`dev-tools/regress.sh` never touches the screen and finishes in seconds, so it
+is wired into `make test` rather than left as a target nobody remembers to run —
+a regression suite with no entry point is a suite that never catches anything.
+Use `make regress` to run only that layer while iterating.
+
+`dev-tools/smoke.sh` skips cases the current environment can't safely run (e.g.
+a real blackout while the menu bar app is live — that would interrupt your
+session). To cover everything, run it **twice**:
 
 ```bash
 # Pass 1 — menu bar app running (covers [13] always-on-display battery release)
@@ -81,12 +94,13 @@ sites read `L("关闭显示器")`; `Sources/Shared/L10n.swift` is the lookup eng
 Lookup degrades in three steps — current language → English → the Chinese key —
 so a missing entry shows Chinese rather than a blank or a leaked key.
 
-**Adding one string therefore means adding it to six files.** Two guards cover
+**Adding one string therefore means adding it to six files.** Three guards cover
 this:
 
 ```bash
-make test        # check-l10n.py (blocking) + smoke.sh
-make l10n-audit  # audit-l10n-concat.py — run by hand after touching strings
+make test           # check-l10n.py (blocking) + regress.sh + smoke.sh
+make l10n-audit     # audit-l10n-concat.py — run by hand after touching strings
+make copy-preview   # render the composed strings in all seven languages
 ```
 
 `check-l10n.py` blocks on the four structural errors (call site missing from the
@@ -102,6 +116,11 @@ joined with `+`, so a Latin-script translation can glue together
 (`power;on battery`) or push a bracket to the wrong side. Chinese hides this
 completely, which is why it needs a tool of its own. It stays out of `make test`
 because its last section needs a human eye.
+
+`make copy-preview` renders the composed strings — name + marker + reason, joined
+clauses — in all seven languages, so you can read the result instead of
+inferring it. A per-fragment check cannot see a concatenation problem; that is
+how the Korean word-boundary bug survived a whole release.
 
 If you can't read a language you're adding a string for, write the English entry
 and say so in the PR — a rough guess in six languages is harder to fix later
