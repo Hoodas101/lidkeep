@@ -7,6 +7,11 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 B=./build/lidkeep
+
+# 有几条断言读的是 CLI 的中文文案（如「取值非法」）。CI 跑在英文系统上，L10n 会
+# 回落到英文，于是同一段代码在本地绿、在 CI 红 —— 恰恰是本脚本要防的那种假信号。
+# 固定语言，让两边跑的是同一个东西。语言回落本身由 smoke.sh【10】负责覆盖。
+export LIDKEEP_LANG=zh
 pass=0; fail=0
 
 ok()   { pass=$((pass+1)); printf '  ✓ %s\n' "$1"; }
