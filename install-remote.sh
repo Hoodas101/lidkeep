@@ -14,7 +14,7 @@ set -u
 REPO="Hoodas101/lidkeep"
 # 仅在「查最新版本」失败时使用的兜底版本。发版时必须同步这个数字：
 # CI 会校验它与 tag 一致，不一致直接失败（避免静默装成旧版）。
-DEFAULT_VERSION="2.2.5"
+DEFAULT_VERSION="2.2.6"
 # 实测（2026-09-11，中国大陆）：直连 GitHub Release 资产 10 秒 0 字节，
 # gh-proxy.com 173 KB/s 且 SHA256 与官方 SHA256SUMS 逐字节一致，故作为首选回退。
 MIRRORS=(
